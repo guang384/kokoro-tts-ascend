@@ -25,6 +25,28 @@ def test_docker_defaults_match_tunables():
     assert _docker_env("ASR_MAX_BATCH_SIZE") == tunables["ASR_MAX_BATCH_SIZE"] == "8"
 
 
+def test_env_helpers_default_from_registry(monkeypatch):
+    """env_* 助手省略 default 参数时查 TUNABLE_PARAMS——默认值单一来源，
+    同一 env 的默认全仓库只写一处（调用点不再各写一份字面量）。"""
+    monkeypatch.delenv("TTS_CHUNK_CHARS", raising=False)
+    monkeypatch.delenv("TTS_SPEED_FLOOR", raising=False)
+    monkeypatch.delenv("METRICS_ENABLED", raising=False)
+    monkeypatch.delenv("KOKORO_VOICE", raising=False)
+    assert proc_common.env_int("TTS_CHUNK_CHARS", minimum=8) == 120
+    assert proc_common.env_float("TTS_SPEED_FLOOR", minimum=0.1) == 0.5
+    assert proc_common.env_bool("METRICS_ENABLED") is True
+    assert proc_common.env_str("KOKORO_VOICE") == "zf_001"
+
+
+def test_health_dir_single_source():
+    """KOKORO_HEALTH_DIR 只在 proc_common.HEALTH_DIR 解析一次，
+    gateway/supervisor 复用同一对象——不会出现两套健康目录。"""
+    import gateway
+    import supervisor
+
+    assert gateway._health_dir is supervisor.HEALTH_DIR is proc_common.HEALTH_DIR
+
+
 def test_requirements_fakeredis_has_lua():
     """claim/ack 走 EVAL；缺 [lua] 时干净本地安装会直接报 unknown command。"""
     text = (_ROOT / "requirements.txt").read_text(encoding="utf-8")

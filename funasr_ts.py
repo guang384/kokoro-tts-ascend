@@ -319,7 +319,7 @@ def warmup_batch(max_batch: int, max_group_sec: float = None) -> int:
     sec = float(max_group_sec if max_group_sec is not None
                 else proc_common.ASR_MAX_GROUP_SEC)
     model, dev = get_model()
-    sr = proc_common.env_int("KOKORO_SAMPLE_RATE", 24000, minimum=8000)
+    sr = proc_common.env_int("KOKORO_SAMPLE_RATE", minimum=8000)
     b = max(1, int(max_batch))
     if _batch_patch["checked"] and _batch_patch["needed"] \
             and not _batch_patch["ok"]:

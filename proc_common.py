@@ -25,48 +25,53 @@ HEALTH_DIR = os.getenv("KOKORO_HEALTH_DIR", "/tmp/kokoro-health")
 
 # 可调配参数清单（名 → 默认值）：supervisor 启动时逐项打印实际值。
 # 声明于此 = 参数面单一事实来源；新增参数必须登记，否则启动日志不显示。
-TUNABLE_PARAMS = [
+# 可调配参数注册表：env 默认值的**唯一来源**——env_int/env_float/env_bool/
+# env_str 省略 default 参数时查此表，同一 env 的默认全仓库只写一处
+# （代码/文档/启动 dump 不漂移；test_defaults_consistency 锁 Dockerfile 对齐）。
+TUNABLE_PARAMS = {
     # ── 进程池数 ──
-    ("GATEWAY_WORKERS", "2"), ("G2P_WORKERS", "2"), ("G2P_THREADS", "2"),
-    ("TTS_WORKERS", "4"),
-    ("ASR_WORKERS", "4"),
+    "GATEWAY_WORKERS": "2", "G2P_WORKERS": "2",
+    # G2P_THREADS 默认动态 =G2P_WORKERS（g2p.py 显式传，此值仅供 dump 展示）
+    "G2P_THREADS": "2",
+    "TTS_WORKERS": "4",
+    "ASR_WORKERS": "4",
     # ── 背压三级闸门 ──
-    ("MAX_PENDING_REQUESTS", "200"), ("MAX_INFLIGHT_SENTENCES", "512"),
-    ("REDISPATCH_MAX", "1"),
-    ("WORKER_MAILBOX_SIZE", "1024"),
+    "MAX_PENDING_REQUESTS": "200", "MAX_INFLIGHT_SENTENCES": "512",
+    "REDISPATCH_MAX": "1",
+    "WORKER_MAILBOX_SIZE": "1024",
     # ── 内容形状（显存上界三乘数 + 请求限制）──
-    ("TTS_CHUNK_CHARS", "120"), ("TTS_SPEED_FLOOR", "0.5"),
-    ("TTS_MAX_BATCH_SIZE", "8"), ("ASR_MAX_BATCH_SIZE", "8"),
-    ("TTS_MAX_INPUT_CHARS", "2000"),
-    ("TTS_BATCH_BUCKET_CHARS", "64"),
+    "TTS_CHUNK_CHARS": "120", "TTS_SPEED_FLOOR": "0.5",
+    "TTS_MAX_BATCH_SIZE": "8", "ASR_MAX_BATCH_SIZE": "8",
+    "TTS_MAX_INPUT_CHARS": "2000",
+    "TTS_BATCH_BUCKET_CHARS": "64",
     # ── 超时与对齐 ──
-    ("WAIT_TIMEOUT_S", "120"), ("FAST_REJECT_MARGIN", "1.15"),
-    ("HEARTBEAT_STALE_S", "30"),
-    ("KEEP_ALIVE_TIMEOUT_S", "0"), ("STUCK_KILL_S", "300"),
-    ("WEDGE_RESTART_S", "900"),
-    ("FFMPEG_TIMEOUT_S", "30"), ("SPAWN_READY_TIMEOUT_S", "360"),
-    ("SHM_ORPHAN_MAX_AGE_S", "300"), ("METRICS_ENABLED", "1"),
-    ("MAX_BODY_BYTES", "4194304"),
-    ("IPC_REDIS_SOCKET", "/tmp/kokoro-redis.sock"),
-    ("IPC_REDIS_URL", ""),
+    "WAIT_TIMEOUT_S": "120", "FAST_REJECT_MARGIN": "1.15",
+    "HEARTBEAT_STALE_S": "30",
+    "KEEP_ALIVE_TIMEOUT_S": "0", "STUCK_KILL_S": "300",
+    "WEDGE_RESTART_S": "900",
+    "FFMPEG_TIMEOUT_S": "30", "SPAWN_READY_TIMEOUT_S": "360",
+    "SHM_ORPHAN_MAX_AGE_S": "300", "METRICS_ENABLED": "1",
+    "MAX_BODY_BYTES": "4194304",
+    "IPC_REDIS_SOCKET": "/tmp/kokoro-redis.sock",
+    "IPC_REDIS_URL": "",
     # ── 功能开关与设备 ──
-    ("DEVICE", ""), ("ASCEND_DEVICE_ID", ""),
-    ("KOKORO_EN_G2P", "auto"), ("KOKORO_DISABLE_COMPLEX", "auto"),
-    ("FUNASR_DEVICE", "auto"), ("FUNASR_INPUT", "auto"),
-    ("G2P_CACHE_SIZE", "4096"), ("KOKORO_G2P_DICT", ""),
+    "DEVICE": "", "ASCEND_DEVICE_ID": "",
+    "KOKORO_EN_G2P": "auto", "KOKORO_DISABLE_COMPLEX": "auto",
+    "FUNASR_DEVICE": "auto", "FUNASR_INPUT": "auto",
+    "G2P_CACHE_SIZE": "4096", "KOKORO_G2P_DICT": "",
     # ── 模型身份（KOKORO_）──
-    ("KOKORO_MODEL_ID", "hexgrad/Kokoro-82M-v1.1-zh"),
-    ("KOKORO_SAMPLE_RATE", "24000"),
-    ("KOKORO_VOICE", "zf_001"),
+    "KOKORO_MODEL_ID": "hexgrad/Kokoro-82M-v1.1-zh",
+    "KOKORO_SAMPLE_RATE": "24000",
+    "KOKORO_VOICE": "zf_001",
     # ── 平台 ──
-    ("PORT", "5174"), ("LOG_LEVEL", "INFO"),
-]
+    "PORT": "5174", "LOG_LEVEL": "INFO",
+}
 
 
 def dump_config(log_fn) -> None:
     """启动时打印全部可调配参数的实际值（env 覆盖后）。"""
     log_fn("──── tunable params (name=value [default]) ────")
-    for name, default in TUNABLE_PARAMS:
+    for name, default in TUNABLE_PARAMS.items():
         val = os.getenv(name, default)
         if name == "IPC_REDIS_URL" and "://" in val and "@" in val:
             # redis://:password@host:port —— 密码不进日志
@@ -110,9 +115,15 @@ def log_level_name(default: str = "info") -> str:
     return default
 
 
-def env_int(name: str, default: int, minimum: int | None = None) -> int:
+def env_int(name: str, default: int | None = None,
+            minimum: int | None = None) -> int:
     """int(os.getenv(...)) 的健壮版：坏值告警 + 回退默认（生产可用性优先，
-    而非裸 ValueError 崩溃重启循环）。空串视同未设置。"""
+    而非裸 ValueError 崩溃重启循环）。空串视同未设置。
+
+    default 省略时查 TUNABLE_PARAMS 注册表（默认值单一来源；未注册的
+    env 属编程错误，KeyError 启动即炸——宁可响也不要静默猜）。"""
+    if default is None:
+        default = int(TUNABLE_PARAMS[name])
     raw = (os.getenv(name) or "").strip()
     if not raw:
         return default
@@ -127,8 +138,11 @@ def env_int(name: str, default: int, minimum: int | None = None) -> int:
     return val
 
 
-def env_float(name: str, default: float, minimum: float | None = None) -> float:
-    """同 env_int 的浮点版。"""
+def env_float(name: str, default: float | None = None,
+              minimum: float | None = None) -> float:
+    """同 env_int 的浮点版（default 省略时查注册表）。"""
+    if default is None:
+        default = float(TUNABLE_PARAMS[name])
     raw = (os.getenv(name) or "").strip()
     if not raw:
         return default
@@ -143,18 +157,40 @@ def env_float(name: str, default: float, minimum: float | None = None) -> float:
     return val
 
 
-def env_bool(name: str, default: bool) -> bool:
-    """布尔 env 解析：1/true/y/on=真，0/false/n/off=假（大小写不敏感）；
-    坏值告警回退默认；未设置返回默认。"""
-    raw = (os.getenv(name) or "").strip().lower()
-    if not raw:
-        return default
+def _bool_of(raw: str) -> bool | None:
+    """布尔字面量解析；不识别返回 None（由调用方决定告警/回退）。"""
     if raw in ("1", "true", "y", "yes", "on"):
         return True
     if raw in ("0", "false", "n", "no", "off"):
         return False
-    _cfg_log.warning("env %s=%r 非布尔（1/0/true/false），使用默认 %s",
-                     name, raw, default)
+    return None
+
+
+def env_bool(name: str, default: bool | None = None) -> bool:
+    """布尔 env 解析：1/true/y/on=真，0/false/n/off=假（大小写不敏感）；
+    坏值告警回退默认；未设置返回默认（省略时查注册表）。"""
+    if default is None and name in TUNABLE_PARAMS:
+        default = _bool_of(TUNABLE_PARAMS[name].lower())
+        if default is None:
+            raise KeyError(f"TUNABLE_PARAMS[{name}] 不是合法布尔字面量")
+    raw = (os.getenv(name) or "").strip().lower()
+    if not raw:
+        return default
+    val = _bool_of(raw)
+    if val is None:
+        _cfg_log.warning("env %s=%r 非布尔（1/0/true/false），使用默认 %s",
+                         name, raw, default)
+        return default
+    return val
+
+
+def env_str(name: str, default: str | None = None) -> str:
+    """字符串 env（strip 后取用；未设置/空串回退 default，省略时查注册表）。"""
+    raw = (os.getenv(name) or "").strip()
+    if raw:
+        return raw
+    if default is None:
+        default = TUNABLE_PARAMS.get(name, "")
     return default
 
 
@@ -200,7 +236,7 @@ IPC_REDIS_SOCKET = os.getenv("IPC_REDIS_SOCKET", "/tmp/kokoro-redis.sock")
 # 外部 redis 模式（IPC_REDIS_URL=tcp://host:port）：不拉起 server、直连
 # ——dev/Windows 验证与多副本共享 redis 用；生产留空走 unix socket 自拉
 IPC_REDIS_URL = (os.getenv("IPC_REDIS_URL") or "").strip()
-TTS_BATCH_BUCKET_CHARS = env_int("TTS_BATCH_BUCKET_CHARS", 64, minimum=8)  # 认领类宽（音素）
+TTS_BATCH_BUCKET_CHARS = env_int("TTS_BATCH_BUCKET_CHARS", minimum=8)  # 认领类宽（音素）
 # asr 对齐作业的单组音频秒上限：组由此硬封顶（g2p._chunk_cap 语速感知切句
 # + funasr_ts._split_groups 超长硬切两层保证），asr 显存预算按它算最坏
 # encoder 帧数（pipeline._asr_auto_budget_mb；g2p._chunk_cap 取本值−2s 为
@@ -319,29 +355,17 @@ def start_redis_server():
     raise RuntimeError(f"redis-server 10s 未就绪 socket={IPC_REDIS_SOCKET}")
 
 
-class InstrumentedQueue:
-    """跨进程有界队列（Redis RPUSH + LPOP，唯一传输）。
+class _RedisQueueBase:
+    """两队列类的公共底座：键命名、spawn 传递、惰性连接、入队戳、EMA。
 
-    对外语义与历版一致：put 超时抛 queue.Full、get 超时抛 queue.Empty、
-    有界容量提供背压。depth（qsize）= LLEN = 队列里真实等待处理的消息数
-    （空闲必归零）；in/out 由服务端 INCR 计数（单点原子，永不失配）；
-    avg_wait_ms 为 EMA（消费者多写者丢样本仅影响均值精度）。
-
-    崩溃语义：消息常驻 redis-server——worker 死亡时队列内消息零丢失
-    （其他 worker 接手）；仅"已 LPOP 正在处理"的 1 条随死亡丢失（该请求
-    由入口侧 WAIT_TIMEOUT 超时 504 兜底）。redis-server 死亡 = 队列与
-    在途**一起丢失**（消息常驻语义的边界：服务端在内存里）——supervisor
-    守护自动重启，队列从零起，在途请求走超时兜底。
-
-    容量门 = LLEN 判满 + RPUSH（非原子：超卖幅度 ≤ 并发生产者数、随消费
-    自愈；背压方向安全，偏晚不偏早——不引 Lua 保持零脚本依赖）。
-    """
+    spawn 传递：只传键名元数据，连接在子进程按需重建（子类追加自己的
+    额外键，__setstate__ 直接继承）。"""
 
     _EMA_ALPHA = 0.2
 
-    def __init__(self, maxsize: int = 0, index: int = 0, name: str = ""):
+    def __init__(self, maxsize: int, index: int, name: str):
         self._index = int(index)
-        self._name = name or f"q{index}"
+        self._name = name
         self._cap = int(maxsize) if maxsize else 1024
         self._key = f"kokoro:q:{self._index}:{self._name}"
         self._key_in = self._key + ":in"
@@ -369,17 +393,49 @@ class InstrumentedQueue:
             item["_q_ts"] = time.time()
         return item
 
+    def _ema_update(self, client, w: float) -> None:
+        """近期平均排队 ms（EMA，消费者多写者丢样本仅影响均值精度）。"""
+        cur = float(client.get(self._key_avg) or 0)
+        client.set(self._key_avg, w if cur <= 0
+                   else (1 - self._EMA_ALPHA) * cur + self._EMA_ALPHA * w)
+
+    def close(self):
+        client, self._client = self._client, None
+        if client is not None:
+            try:
+                client.close()
+            except Exception:  # noqa: BLE001  幂等
+                pass
+
+
+class InstrumentedQueue(_RedisQueueBase):
+    """跨进程有界队列（Redis RPUSH + LPOP，唯一传输）。
+
+    对外语义与历版一致：put 超时抛 queue.Full、get 超时抛 queue.Empty、
+    有界容量提供背压。depth（qsize）= LLEN = 队列里真实等待处理的消息数
+    （空闲必归零）；in/out 由服务端 INCR 计数（单点原子，永不失配）；
+    avg_wait_ms 为 EMA（消费者多写者丢样本仅影响均值精度）。
+
+    崩溃语义：消息常驻 redis-server——worker 死亡时队列内消息零丢失
+    （其他 worker 接手）；仅"已 LPOP 正在处理"的 1 条随死亡丢失（该请求
+    由入口侧 WAIT_TIMEOUT 超时 504 兜底）。redis-server 死亡 = 队列与
+    在途**一起丢失**（消息常驻语义的边界：服务端在内存里）——supervisor
+    守护自动重启，队列从零起，在途请求走超时兜底。
+
+    容量门 = LLEN 判满 + RPUSH（非原子：超卖幅度 ≤ 并发生产者数、随消费
+    自愈；背压方向安全，偏晚不偏早——不引 Lua 保持零脚本依赖）。
+    """
+
+    def __init__(self, maxsize: int = 0, index: int = 0, name: str = ""):
+        super().__init__(maxsize, index, name or f"q{index}")
+
     def _count_get(self, item):
         if isinstance(item, dict):
             ts = item.pop("_q_ts", None)
             if ts is not None:
                 w = (time.time() - ts) * 1000
                 item["_qw_ms"] = w   # 逐条等待随消息带回（EMA 只留均值，精确值供 /tts 日志阶段分解）
-                client = self._redis()
-                cur = float(client.get(self._key_avg) or 0)
-                client.set(self._key_avg, w if cur <= 0
-                           else (1 - self._EMA_ALPHA) * cur
-                           + self._EMA_ALPHA * w)
+                self._ema_update(self._redis(), w)
         return item
 
     def _try_push(self, data) -> bool:
@@ -489,7 +545,7 @@ class InstrumentedQueue:
                 pass
 
 
-class TtsClaimQueue:
+class TtsClaimQueue(_RedisQueueBase):
     """TTS chunk 的认领式队列（Redis ZSET：score=FIFO 序号，
     member=2B 音素数 + 1B 精度 + 20B 序号 + pickle 载荷）。
 
@@ -511,41 +567,20 @@ class TtsClaimQueue:
     """
 
     def __init__(self, maxsize: int = 0, index: int = 0, name: str = "tts"):
-        self._index = int(index)
-        self._name = name
-        self._cap = int(maxsize) if maxsize else 1024
-        self._key = f"kokoro:q:{self._index}:{self._name}"
-        self._key_in = self._key + ":in"
-        self._key_out = self._key + ":out"
-        self._key_avg = self._key + ":avg"
+        super().__init__(maxsize, index, name)
         self._key_seq = "kokoro:seq"
         self._key_ratt = "kokoro:ratt"
         self._key_cancel = "kokoro:cancel"
-        self._client = None
 
-    # ── spawn 传递：只传键名元数据，连接按进程惰性重建 ──
+    # ── spawn 传递：底座键名 + 本类追加键 ──
     def __getstate__(self):
-        return {"_index": self._index, "_name": self._name, "_cap": self._cap,
-                "_key": self._key, "_key_in": self._key_in,
-                "_key_out": self._key_out, "_key_avg": self._key_avg,
-                "_key_seq": self._key_seq,
-                "_key_ratt": self._key_ratt, "_key_cancel": self._key_cancel}
-
-    def __setstate__(self, state):
-        self.__dict__.update(state)
-        self._client = None
-
-    def _redis(self):
-        if self._client is None:
-            self._client = _make_redis_client()
-        return self._client
+        state = super().__getstate__()
+        state.update({"_key_seq": self._key_seq,
+                      "_key_ratt": self._key_ratt,
+                      "_key_cancel": self._key_cancel})
+        return state
 
     # ── 取消标记（断连取消链：gateway ZADD 时刻 → tts 认领后检查跳过）──
-    def _stamp(self, item):
-        if isinstance(item, dict):
-            item["_q_ts"] = time.time()
-        return item
-
     def cancelled_set(self, req_ids) -> set:
         """批量断连标记查询（单次 RTT）：一批 chunk 常来自同几个请求，
         逐条 ZSCORE 是 B 次 RTT——pipeline 合一。返回已取消的 req_id 集。"""
@@ -676,11 +711,7 @@ class TtsClaimQueue:
             # EMA 一次 GET/SET（旧实现逐 chunk 两 RTT × B）：批均值入 EMA，
             # 长期均值语义不变
             try:
-                w = sum(waits_ms) / len(waits_ms)
-                cur = float(client.get(self._key_avg) or 0)
-                client.set(self._key_avg, w if cur <= 0
-                           else (1 - InstrumentedQueue._EMA_ALPHA) * cur
-                           + InstrumentedQueue._EMA_ALPHA * w)
+                self._ema_update(client, sum(waits_ms) / len(waits_ms))
             except Exception as exc:  # noqa: BLE001  纯指标，绝不影响交付
                 _qlog.warning("claim wait-EMA update failed worker=%s: %s",
                               worker_id, str(exc)[:120])
@@ -736,6 +767,30 @@ class TtsClaimQueue:
                                   worker_id, len(members), str(exc)[:120])
         return 0
 
+    def _drop_member(self, client, infl_key: str, m) -> None:
+        """毒块/超限 member：清在途账本+重派计数，:bad 计数（统计与防护
+        共用一条路径——两种放弃在 /metrics 观感一致）。"""
+        client.zrem(infl_key, m)
+        client.hdel(self._key_ratt, m)
+        client.incr(self._key + ":bad")
+
+    def _redispatch_one(self, client, infl_key: str, m, seq,
+                        max_redispatch) -> str:
+        """单 member 重派（requeue_worker/sweep 共用）：毒块（seq=None，
+        decode 失败）或重派超限 → 清账本丢弃返回 "gaveup"；正常 → 回主
+        队列（score=原 FIFO 序号，保到达序）并移出在途，返回 "ok"。"""
+        if seq is None:
+            self._drop_member(client, infl_key, m)
+            return "gaveup"
+        if max_redispatch is not None:
+            attempts = client.hincrby(self._key_ratt, m, 1)
+            if attempts > max_redispatch:
+                self._drop_member(client, infl_key, m)
+                return "gaveup"
+        client.zadd(self._key, {m: seq})
+        client.zrem(infl_key, m)
+        return "ok"
+
     def requeue_worker(self, worker_id: str, max_redispatch: int | None = None) -> int:
         """worker 死亡精确重派：其在途账本的全部 member 立即回主队列
         （score=member 内原 FIFO 序号，保到达序）。supervisor 在 respawn
@@ -752,25 +807,10 @@ class TtsClaimQueue:
         n = 0
         try:
             for m in client.zrange(infl_key, 0, -1):
-                chunk, seq = decode_member(m)
-                if chunk is None:
-                    # 真损坏（新/旧头都解不出）：丢弃并计数——不能让它中断
-                    # 整本账本的重派（其余 chunk 还在等）；旧格式可解码，
-                    # 不在此列（升级期单向兼容）
-                    client.zrem(infl_key, m)
-                    client.hdel(self._key_ratt, m)
-                    client.incr(self._key + ":bad")
-                    continue
-                if max_redispatch is not None:
-                    attempts = client.hincrby(self._key_ratt, m, 1)
-                    if attempts > max_redispatch:
-                        client.zrem(infl_key, m)
-                        client.hdel(self._key_ratt, m)
-                        client.incr(self._key + ":bad")   # 重派超限放弃
-                        continue
-                client.zadd(self._key, {m: seq})
-                client.zrem(infl_key, m)
-                n += 1
+                _chunk, seq = decode_member(m)
+                if (self._redispatch_one(client, infl_key, m, seq,
+                                         max_redispatch) == "ok"):
+                    n += 1   # 毒块单条丢弃，不中断整本账本的重派
         except Exception:  # noqa: BLE001  redis 瞬断：下轮 sweep 兜底
             pass
         return n
@@ -828,28 +868,15 @@ class TtsClaimQueue:
             else:
                 members = client.zrange(infl_key, 0, -1)
             for m in members:
-                # seq = member 内原 FIFO 序号（F4：曾用 ps_len 作 score 致插队）
-                chunk, seq = decode_member(m)
-                if chunk is None:
-                    # 真损坏（新/旧头都解不出）：丢弃并计数。不能抛出——
-                    # 否则整轮 sweep 中止，同轮其他死亡 worker 的在途 chunk
-                    # 全部延迟到下一轮（甚至永不重派）。旧格式可解码，不在此列
-                    client.zrem(infl_key, m)
-                    client.hdel(self._key_ratt, m)
-                    client.incr(self._key + ":bad")
+                # seq = member 内原 FIFO 序号（F4：曾用 ps_len 作 score 致插队）。
+                # 毒块单条丢弃不抛出——否则整轮 sweep 中止，同轮其他死亡
+                # worker 的在途 chunk 全部延迟到下一轮（甚至永不重派）。
+                _chunk, seq = decode_member(m)
+                if (self._redispatch_one(client, infl_key, m, seq,
+                                         max_redispatch) == "ok"):
+                    redispatched += 1
+                else:
                     gaveup += 1
-                    continue
-                if max_redispatch is not None:
-                    attempts = client.hincrby(self._key_ratt, m, 1)
-                    if attempts > max_redispatch:
-                        client.zrem(infl_key, m)
-                        client.hdel(self._key_ratt, m)
-                        client.incr(self._key + ":bad")   # 重派超限放弃
-                        gaveup += 1
-                        continue
-                client.zadd(self._key, {m: seq})
-                client.zrem(infl_key, m)
-                redispatched += 1
         return {"redispatched": redispatched, "gaveup": gaveup}
 
 
@@ -892,6 +919,26 @@ def _queue_stats(q) -> dict:
     except Exception:  # noqa: BLE001  平台不支持/队列已关闭 → unknown
         return {"depth": None}
 
+
+def shm_usage() -> dict | None:
+    """/dev/shm 使用情况（MB + 水位 pct + total_bytes）；不可用（非 POSIX/
+    Windows 开发机）返回 None。gateway /health·水位告警与 supervisor 启动
+    自检共用——statvfs 全仓库唯一一处。"""
+    try:
+        st = os.statvfs("/dev/shm")
+        frsize = st.f_frsize
+        total = frsize * st.f_blocks
+        if total <= 0:
+            return None
+        used = frsize * (st.f_blocks - st.f_bavail)
+        return {"total_mb": round(total / 2**20, 1),
+                "used_mb": round(used / 2**20, 1),
+                "total_bytes": total,
+                "pct": round(used / total * 100, 1)}
+    except (OSError, AttributeError):
+        return None
+
+
 _wtag_filter = None  # 单例可变 tag 过滤器（幂等关键：重复调用不堆积）
 
 
@@ -926,6 +973,31 @@ def write_heartbeat(health_dir: str, pid: int, snapshot: dict) -> None:
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(snapshot, f, ensure_ascii=False)
     os.replace(tmp, os.path.join(health_dir, f"worker-{pid}.json"))
+
+
+def retry_forever(do_init, warm_key: str, warm: dict, what: str,
+                  log_fn) -> object:
+    """worker 模型加载重试骨架（tts KModel / asr FunASR / g2p 引擎共用）：
+    指数退避 5s→120s 驻留重试；失败置 warm[key]="fail"（/health 503 →
+    编排层重启容器）。
+
+    看门狗 SIGKILL 前代工人后，NPU 显存回收有延迟、aicore 可能短暂坏态
+    ——立即重生再初始化会失败。原"失败永久驻留不重试"会让一次坏态变成
+    整池永久死亡（生产事故 20261108：6/6 tts 全部 warm=fail 僵尸、零容量，
+    认领队列顶满全服务堵塞）。**不降级**（fail-fast）：持续失败保持
+    warm=fail，编排层重启容器换取全新 NPU 上下文；悄悄降级 CPU 会把
+    "卡坏了"伪装成"还能跑"，掩盖故障。"""
+    delay = 5.0
+    while True:
+        try:
+            return do_init()
+        except Exception as exc:  # noqa: BLE001
+            warm[warm_key] = "fail"
+            log_fn.error("%s init failed, retry in %.0fs (warm=fail → /health"
+                         " 503 → orchestration restarts container): %s",
+                         what, delay, str(exc)[:200])
+            time.sleep(delay)
+            delay = min(delay * 2, 120.0)
 
 
 def _heartbeat_once(tag: str, pid: int, stats_fn, health_dir: str) -> None:

@@ -31,8 +31,8 @@ from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
 
-# 离线属性强制（与 proc_common 同一约定）
-os.environ["HF_HUB_OFFLINE"] = "1"
+# HF_HUB_OFFLINE=1 由 proc_common 模块级强制（全仓库唯一一处；本模块
+# import pipeline 时已经传递性地执行过）
 
 import pipeline
 import proc_common
@@ -42,7 +42,7 @@ import protocol
 # 未注入（异常环境）按 0 兜底——绝不让 int("") 这类解析错误在首个请求时炸掉受理路径
 _worker_idx = os.getenv("WORKER_IDX", "")
 _worker_origin = int(_worker_idx) if _worker_idx.strip().lstrip("-").isdigit() else 0
-_entry_wait_s = proc_common.env_float("WAIT_TIMEOUT_S", 120.0, minimum=1.0)  # 单请求总预算（秒；/tts 音频+时间戳共享，与 SHM 孤儿回收公式同一解析器，小数秒合法）
+_entry_wait_s = proc_common.env_float("WAIT_TIMEOUT_S", minimum=1.0)  # 单请求总预算（秒；/tts 音频+时间戳共享，与 SHM 孤儿回收公式同一解析器，小数秒合法）
 
 
 def _derive_latency_buckets(timeout_s: float) -> tuple:
@@ -65,38 +65,30 @@ def _bucket_label(edge: float) -> str:
     return str(int(edge)) if float(edge).is_integer() else format(edge, "g")
 
 
-FAST_REJECT_MARGIN = proc_common.env_float("FAST_REJECT_MARGIN", 1.15, minimum=1.0)  # 准入快速拒绝冗余系数：预估等待 > 预算×系数 才拒（EMA 是估计值，边界放行）
-_MAX_PENDING_REQUESTS = proc_common.env_int("MAX_PENDING_REQUESTS", 200, minimum=1)  # /health 队列积压判定用
-_WORKER_MAILBOX_SIZE = proc_common.env_int("WORKER_MAILBOX_SIZE", 1024, minimum=1)   # 同上（与 supervisor 同 env）
+FAST_REJECT_MARGIN = proc_common.env_float("FAST_REJECT_MARGIN", minimum=1.0)  # 准入快速拒绝冗余系数：预估等待 > 预算×系数 才拒（EMA 是估计值，边界放行）
+_MAX_PENDING_REQUESTS = proc_common.env_int("MAX_PENDING_REQUESTS", minimum=1)  # /health 队列积压判定用
+_WORKER_MAILBOX_SIZE = proc_common.env_int("WORKER_MAILBOX_SIZE", minimum=1)   # 同上（与 supervisor 同 env）
 
 
-class _WorkerTagFilter(logging.Filter):
-    def filter(self, record):
-        record.wtag = os.getenv("WORKER_TAG") or f"pid{os.getpid()}"
-        return True
-
-
-logging.basicConfig(level=proc_common.log_level(),
-                    format="[%(wtag)s] %(levelname)s:%(name)s:%(message)s")
-# filter 必须挂在 handler 上：logger 级 filter 对子 logger 传播上来的记录不生效
-for _h in logging.getLogger().handlers:
-    _h.addFilter(_WorkerTagFilter())
+# 日志走 proc_common.setup_logging（wtag 过滤器与格式单一来源，带 asctime；
+# worker/gateway 同一款）。logger 名保留 kokoro.server（测试 caplog 锚定）。
+proc_common.setup_logging(os.getenv("WORKER_TAG") or f"pid{os.getpid()}")
 log = logging.getLogger("kokoro.server")
 
-_sample_rate = proc_common.env_int("KOKORO_SAMPLE_RATE", 24000, minimum=8000)
-_speed_floor = proc_common.env_float("TTS_SPEED_FLOOR", 0.5, minimum=0.1)
-_max_chars = proc_common.env_int("TTS_MAX_INPUT_CHARS", 2000, minimum=1)
-_default_voice = os.getenv("KOKORO_VOICE", "zf_001")
-_ffmpeg_timeout_s = proc_common.env_float("FFMPEG_TIMEOUT_S", 30.0, minimum=5.0)
+_sample_rate = proc_common.env_int("KOKORO_SAMPLE_RATE", minimum=8000)
+_speed_floor = proc_common.env_float("TTS_SPEED_FLOOR", minimum=0.1)
+_max_chars = proc_common.env_int("TTS_MAX_INPUT_CHARS", minimum=1)
+_default_voice = proc_common.env_str("KOKORO_VOICE")
+_ffmpeg_timeout_s = proc_common.env_float("FFMPEG_TIMEOUT_S", minimum=5.0)
 _image_version = os.getenv("IMAGE_VERSION", "dev")  # 镜像版本号（构建期注入日期版本，本地直跑为 dev）
-METRICS_ENABLED = proc_common.env_bool("METRICS_ENABLED", True)  # /metrics 开关（0 关闭返回 404）
+METRICS_ENABLED = proc_common.env_bool("METRICS_ENABLED")  # /metrics 开关（0 关闭返回 404）
 
 # ── 心跳与 /health 聚合 ──
-_health_dir = os.getenv("KOKORO_HEALTH_DIR", "/tmp/kokoro-health")
+_health_dir = proc_common.HEALTH_DIR   # 单一来源（proc_common 模块常量）
 _HEALTHBEAT_INTERVAL = 5.0
 # 心跳陈旧阈值：与 supervisor 判 hang 用同一 env（默认 30s = 6×心跳周期），
 # 原硬编码 15s 会在心跳轻微抖动时把活 worker 从视图剔除 → readiness 抖动
-_HEALTH_STALE_AFTER = proc_common.env_float("HEARTBEAT_STALE_S", 30.0, minimum=15.0)
+_HEALTH_STALE_AFTER = proc_common.env_float("HEARTBEAT_STALE_S", minimum=15.0)
 _heartbeat_task: Optional[asyncio.Task] = None
 _started_at = time.time()
 
@@ -214,6 +206,31 @@ def _write_own_health() -> None:
         log.warning("heartbeat write failed: %s", exc)
 
 
+def _health_dir_entries(prefixes=("worker-",), fresh_only: bool = True):
+    """健康目录条目扫描 [(name, path, age_s)]：listdir + 前缀过滤 + 可选
+    新鲜度过滤。/collect 聚合、/tts 的 asr 就绪探测、心跳僵尸文件清理
+    三个读者共用——listdir+mtime+json 是同步磁盘 IO，只写一处。
+
+    TOCTOU 安全：getmtime 失败的条目静默跳过（写方 os.replace 的窗口，
+    生产事故 20261110：.tmp-<pid> 存在窗口毫秒级，撞上即 FileNotFoundError）。"""
+    try:
+        names = os.listdir(_health_dir)
+    except OSError:
+        return   # 目录瞬时不可用（人工清理/挂载抖动）：本轮空，5s 后自愈
+    now = time.time()
+    for name in names:
+        if not name.startswith(tuple(prefixes)):
+            continue  # .tmp-：写一半崩溃的残片，仅清理路径关心
+        path = os.path.join(_health_dir, name)
+        try:
+            age = now - os.path.getmtime(path)
+        except OSError:
+            continue
+        if fresh_only and age > _HEALTH_STALE_AFTER:
+            continue  # 超时未心跳：worker 已死（如被 SIGKILL），剔除
+        yield name, path, age
+
+
 def _sweep_leaks() -> None:
     """TTL 清扫：请求方已放弃的聚合状态/孤儿 Future——部分失败场景下
     （worker 崩溃丢块、asr 作业丢失）唯一的回收手段，防 _pending/
@@ -280,31 +297,14 @@ def _sweep_orphan_shm() -> int:
 
 
 def _shm_stats() -> dict | None:
-    """/dev/shm 使用情况（MB + 水位）；不可用（非 POSIX/Windows 开发机）返回 None。"""
-    try:
-        st = os.statvfs("/dev/shm")
-        frsize = st.f_frsize
-        total_mb = round(frsize * st.f_blocks / 2**20, 1)
-        used_mb = round(frsize * (st.f_blocks - st.f_bavail) / 2**20, 1)
-        if total_mb <= 0:
-            return None
-        return {"total_mb": total_mb, "used_mb": used_mb,
-                "pct": round(used_mb / total_mb * 100, 1)}
-    except (OSError, AttributeError):
-        return None
+    """/dev/shm 使用情况（MB + 水位）；读不了返回 None。实现单一来源在
+    proc_common.shm_usage（supervisor 启动自检共用）。"""
+    return proc_common.shm_usage()
 
 
 def _shm_used_pct() -> float:
     """/dev/shm 水位（0-100）；读不了（非 POSIX/Windows 开发机）返回 -1。"""
-    try:
-        st = os.statvfs("/dev/shm")
-        total = st.f_frsize * st.f_blocks
-        free = st.f_frsize * st.f_bavail
-        if total <= 0:
-            return -1.0
-        return round((total - free) / total * 100, 1)
-    except (OSError, AttributeError):
-        return -1.0
+    return (_shm_stats() or {}).get("pct", -1.0)
 
 
 async def _heartbeat_loop() -> None:
@@ -317,22 +317,12 @@ async def _heartbeat_loop() -> None:
             if pct >= 80:  # SHM 高水位：再涨就 SIGBUS（长文本 /tts 的历史根因）
                 _throttled_warn("shm", "/dev/shm 水位 %.0f%% —— 音频块写满即 SIGBUS，"
                                 "加大 --shm-size 或降低 /tts 并发", pct)
-            now = time.time()
-            try:
-                hb_names = os.listdir(_health_dir)
-            except OSError:
-                hb_names = []   # 目录瞬时不可用（人工清理/挂载抖动）：本轮跳过，5s 后自愈
-            for name in hb_names:  # 顺带清理已死 worker 的僵尸文件
-                path = os.path.join(_health_dir, name)
-                if not name.startswith(("worker-", ".tmp-")):
-                    continue  # .tmp-：写一半崩溃的残片，同样回收
-                try:
-                    # 阈值对齐心跳 stale 线（30s）：supervisor 死后 /health
-                    # 角色虚高窗口从 60s 减半；活 worker 心跳 5s 一刷不会误删
-                    stale = now - os.path.getmtime(path) > _HEALTH_STALE_AFTER
-                except OSError:
-                    continue  # TOCTOU：listdir 与 getmtime 之间被写方 os.replace 走（生产事故 20261110：.tmp-<pid> 存在窗口毫秒级，撞上即 FileNotFoundError 刷 ERROR 栈）
-                if stale:
+            for name, path, age in _health_dir_entries(
+                    prefixes=("worker-", ".tmp-"), fresh_only=False):
+                # 顺带清理已死 worker 的僵尸文件；阈值对齐心跳 stale 线
+                # （30s）：supervisor 死后 /health 角色虚高窗口从 60s 减半；
+                # 活 worker 心跳 5s 一刷不会误删
+                if age > _HEALTH_STALE_AFTER:
                     try:
                         os.unlink(path)
                     except OSError:
@@ -780,20 +770,12 @@ def _collect() -> dict:
     """
     me = _worker_snapshot()
     workers, now = [], time.time()
-    try:
-        for name in sorted(os.listdir(_health_dir)):
-            if not name.startswith("worker-"):
-                continue
-            path = os.path.join(_health_dir, name)
-            try:
-                if now - os.path.getmtime(path) > _HEALTH_STALE_AFTER:
-                    continue  # 超时未心跳：worker 已死（如被 SIGKILL），剔除
-                with open(path, encoding="utf-8") as f:
-                    workers.append(json.load(f))
-            except (OSError, ValueError):
-                continue
-    except OSError:
-        pass
+    for _name, path, _age in _health_dir_entries():
+        try:
+            with open(path, encoding="utf-8") as f:
+                workers.append(json.load(f))
+        except (OSError, ValueError):
+            continue
     if not workers:  # 刚启动、心跳尚未落盘的窗口期，至少展示自己
         workers = [me]
 
@@ -863,7 +845,7 @@ def _collect() -> dict:
     # tts 队列真实容量是 MAX_INFLIGHT_SENTENCES（认领队列构造参数），
     # 不落 WORKER_MAILBOX_SIZE 默认——否则积压告警线 0.85×1024 永不可达
     caps = {"g2p_queue": _MAX_PENDING_REQUESTS,
-            "tts_queue": proc_common.env_int("MAX_INFLIGHT_SENTENCES", 512,
+            "tts_queue": proc_common.env_int("MAX_INFLIGHT_SENTENCES",
                                              minimum=1)}
     _STAGE_OF = {"g2p_queue": "g2p", "tts_queue": "tts",
                  "asr_queue": "asr"}
@@ -1011,206 +993,162 @@ if METRICS_ENABLED:
             data = _collect()
 
             # e2e 计数器（聚合绝对值；自定义 Collector 输出绝对值 Counter 合法）
-            c = CounterMetricFamily("kokoro_e2e_requests", "受理请求总数")
-            c.add_metric([], data["e2e"]["requests"])
-            yield c
-            c = CounterMetricFamily("kokoro_e2e_successes", "成功总数")
-            c.add_metric([], data["e2e"]["successes"])
-            yield c
-            c = CounterMetricFamily("kokoro_e2e_timeouts", "超时累计")
-            c.add_metric([], data["e2e"]["timed_out"])
-            yield c
-            c = CounterMetricFamily("kokoro_e2e_rejected", "背压拒绝累计（队列满）")
-            c.add_metric([], data["e2e"]["rejected"])
-            yield c
-            c = CounterMetricFamily("kokoro_e2e_fast_reject",
-                                    "准入快速拒绝累计（排队积压预估超等待预算）")
-            c.add_metric([], data["e2e"]["fast_reject"])
-            yield c
-            c = CounterMetricFamily("kokoro_e2e_cancelled", "客户端断开取消累计")
-            c.add_metric([], data["e2e"]["cancelled"])
-            yield c
-            c = CounterMetricFamily("kokoro_e2e_failed", "终态失败累计（超时+合成失败+服务端 500）")
-            c.add_metric([], data["e2e"]["failed"])
-            yield c
-            c = CounterMetricFamily("kokoro_e2e_server_5xx",
-                                    "服务端 5xx 累计（Redis 不可达等快速失败）")
-            c.add_metric([], data["e2e"]["server_5xx"])
-            yield c
+            for name, doc, key in (
+                    ("kokoro_e2e_requests", "受理请求总数", "requests"),
+                    ("kokoro_e2e_successes", "成功总数", "successes"),
+                    ("kokoro_e2e_timeouts", "超时累计", "timed_out"),
+                    ("kokoro_e2e_rejected", "背压拒绝累计（队列满）", "rejected"),
+                    ("kokoro_e2e_fast_reject",
+                     "准入快速拒绝累计（排队积压预估超等待预算）", "fast_reject"),
+                    ("kokoro_e2e_cancelled", "客户端断开取消累计", "cancelled"),
+                    ("kokoro_e2e_failed",
+                     "终态失败累计（超时+合成失败+服务端 500）", "failed"),
+                    ("kokoro_e2e_server_5xx",
+                     "服务端 5xx 累计（Redis 不可达等快速失败）", "server_5xx")):
+                c = CounterMetricFamily(name, doc)
+                c.add_metric([], data["e2e"][key])
+                yield c
 
             # 队列 4 阶段（g2p → tts → asr → gateway）
-            depth = GaugeMetricFamily("kokoro_queue_depth", "队列当前堆积", labels=["stage"])
-            in_t = CounterMetricFamily("kokoro_queue_in_total", "队列累计入队", labels=["stage"])
-            out_t = CounterMetricFamily("kokoro_queue_out_total", "队列累计出队", labels=["stage"])
-            wait = GaugeMetricFamily("kokoro_queue_avg_wait_ms", "近期平均排队毫秒", labels=["stage"])
-            # 坏 member 丢弃（滚动升级混跑旧格式/载荷损坏）——非零即需排查
-            bad_t = CounterMetricFamily("kokoro_queue_bad_total",
-                                        "坏 member 丢弃累计", labels=["stage"])
+            q_fams = {key: cls(name, doc, labels=["stage"]) for key, name, cls, doc in (
+                    ("depth", "kokoro_queue_depth", GaugeMetricFamily, "队列当前堆积"),
+                    ("in", "kokoro_queue_in_total", CounterMetricFamily, "队列累计入队"),
+                    ("out", "kokoro_queue_out_total", CounterMetricFamily, "队列累计出队"),
+                    ("avg_wait_ms", "kokoro_queue_avg_wait_ms", GaugeMetricFamily,
+                     "近期平均排队毫秒"),
+                    # 坏 member 丢弃（载荷损坏/外部误写）——非零即需排查
+                    ("bad", "kokoro_queue_bad_total", CounterMetricFamily,
+                     "坏 member 丢弃累计"))}
             for stage, q in data["queues"].items():
-                depth.add_metric([stage], q["depth"])
-                in_t.add_metric([stage], q["in"])
-                out_t.add_metric([stage], q["out"])
-                wait.add_metric([stage], q["avg_wait_ms"])
-                bad_t.add_metric([stage], q["bad"])
-            yield depth
-            yield in_t
-            yield out_t
-            yield wait
-            yield bad_t
+                for key, fam in q_fams.items():
+                    fam.add_metric([stage], q[key])
+            yield from q_fams.values()
 
-            # 每 worker（含 raw 快照里的 npu_mem/stuck_s/cache 统计）
-            done = CounterMetricFamily("kokoro_worker_done_total", "完成工作单元数",
-                                       labels=["worker", "role"])
-            err = CounterMetricFamily("kokoro_worker_errors_total", "错误累计",
-                                      labels=["worker", "role"])
-            crashes = CounterMetricFamily("kokoro_worker_crashes_total", "累计崩溃次数",
-                                          labels=["worker"])
-            ready_g = GaugeMetricFamily("kokoro_worker_ready", "就绪状态 0/1",
-                                        labels=["worker", "role"])
-            rtx = GaugeMetricFamily("kokoro_worker_realtime_x", "实时倍速（tts）",
-                                    labels=["worker"])
-            wavg = GaugeMetricFamily("kokoro_worker_avg_ms", "单位工作量平均毫秒",
-                                     labels=["worker", "role"])
-            stuck = GaugeMetricFamily("kokoro_worker_stuck_seconds", "busy 卡住秒数",
-                                      labels=["worker", "role"])
-            npu_r = GaugeMetricFamily("kokoro_worker_npu_mem_reserved_mb",
-                                      "NPU 显存预留 MB（torch 缓存池）",
-                                      labels=["worker"])
-            npu_p = GaugeMetricFamily("kokoro_worker_npu_budget_pct",
-                                      "NPU 预算占比（reserved/budget）",
-                                      labels=["worker"])
-            # 每 worker 内存明细：allocated/reserved 来自 torch，
-            # context 是 CANN 上下文估算（tts 450 / asr 153），
-            # estimated = reserved+context，planned = 0.98×budget+context。
-            npu_alloc = GaugeMetricFamily("kokoro_worker_npu_mem_allocated_mb",
-                                          "NPU 当前分配 MB", labels=["worker", "role"])
-            npu_est = GaugeMetricFamily("kokoro_worker_npu_mem_estimated_mb",
-                                        "NPU 估算物理占用 MB（reserved+CANN ctx）",
-                                        labels=["worker", "role"])
-            npu_plan = GaugeMetricFamily("kokoro_worker_npu_mem_planned_mb",
-                                         "NPU 容量核算 MB（0.98×budget+CANN ctx）",
-                                         labels=["worker", "role"])
-            npu_budget = GaugeMetricFamily("kokoro_worker_npu_mem_budget_mb",
-                                           "NPU worker 预算 MB", labels=["worker", "role"])
-            npu_ctx = GaugeMetricFamily("kokoro_worker_npu_mem_context_mb",
-                                        "CANN 上下文估算 MB", labels=["worker", "role"])
-            npu_card = GaugeMetricFamily("kokoro_worker_npu_mem_card_pct",
-                                         "估算占用/整卡 %", labels=["worker", "role"])
-            npu_proc = GaugeMetricFamily("kokoro_worker_npu_mem_process_mb",
-                                         "npu-smi 实测进程内存 MB",
-                                         labels=["worker", "role"])
-            npu_delta = GaugeMetricFamily("kokoro_worker_npu_mem_delta_mb",
-                                          "实测 - planned MB（正=公式低估）",
-                                          labels=["worker", "role"])
-            npu_ctx_actual = GaugeMetricFamily(
-                "kokoro_worker_npu_mem_context_actual_mb",
-                "实测 - torch reserved MB（实际非 torch 开销）",
-                labels=["worker", "role"])
-            npu_limit = GaugeMetricFamily(
-                "kokoro_worker_npu_mem_limit_mb",
-                "fraction 允许的进程上限 MB（1.05×budget+context）",
-                labels=["worker", "role"])
-            gh = CounterMetricFamily("kokoro_g2p_cache_hits_total", "g2p 缓存命中",
-                                     labels=["worker"])
-            gm = CounterMetricFamily("kokoro_g2p_cache_misses_total", "g2p 缓存未命中",
-                                     labels=["worker"])
-            # 灰度期观察 fp16 流量占比（按批计；0 不输出）
-            fp16b = CounterMetricFamily("kokoro_worker_fp16_batches_total",
-                                        "fp16 前向批数", labels=["worker"])
-            # asr 批推可观测：生效档与安全补丁状态（0=未装→已自动降单条）
-            batch_eff = GaugeMetricFamily("kokoro_worker_batch_effective",
-                                          "ASR 批推生效批宽", labels=["worker", "role"])
-            batch_patch = GaugeMetricFamily("kokoro_worker_batch_patch_ok",
-                                            "ASR 批推安全补丁状态（1=已安装）",
-                                            labels=["worker", "role"])
+            # 每 worker 指标族（声明表：短名 → (指标名, 类, help, labels)；
+            # npu 内存明细一族一戳：allocated/reserved 来自 torch，context 是
+            # CANN 上下文估算（tts 450 / asr 153），estimated = reserved+context，
+            # planned = 0.98×budget+context）
+            W = {short: cls(name, doc, labels=list(lb))
+                 for short, name, cls, doc, lb in (
+                    ("done", "kokoro_worker_done_total", CounterMetricFamily,
+                     "完成工作单元数", ("worker", "role")),
+                    ("err", "kokoro_worker_errors_total", CounterMetricFamily,
+                     "错误累计", ("worker", "role")),
+                    ("crashes", "kokoro_worker_crashes_total", CounterMetricFamily,
+                     "累计崩溃次数", ("worker",)),
+                    ("ready", "kokoro_worker_ready", GaugeMetricFamily,
+                     "就绪状态 0/1", ("worker", "role")),
+                    ("realtime_x", "kokoro_worker_realtime_x", GaugeMetricFamily,
+                     "实时倍速（tts）", ("worker",)),
+                    ("avg_ms", "kokoro_worker_avg_ms", GaugeMetricFamily,
+                     "单位工作量平均毫秒", ("worker", "role")),
+                    ("stuck", "kokoro_worker_stuck_seconds", GaugeMetricFamily,
+                     "busy 卡住秒数", ("worker", "role")),
+                    ("npu_reserved", "kokoro_worker_npu_mem_reserved_mb",
+                     GaugeMetricFamily, "NPU 显存预留 MB（torch 缓存池）", ("worker",)),
+                    ("npu_budget_pct", "kokoro_worker_npu_budget_pct",
+                     GaugeMetricFamily, "NPU 预算占比（reserved/budget）", ("worker",)),
+                    ("npu_allocated", "kokoro_worker_npu_mem_allocated_mb",
+                     GaugeMetricFamily, "NPU 当前分配 MB", ("worker", "role")),
+                    ("npu_estimated", "kokoro_worker_npu_mem_estimated_mb",
+                     GaugeMetricFamily, "NPU 估算物理占用 MB（reserved+CANN ctx）",
+                     ("worker", "role")),
+                    ("npu_planned", "kokoro_worker_npu_mem_planned_mb",
+                     GaugeMetricFamily, "NPU 容量核算 MB（0.98×budget+CANN ctx）",
+                     ("worker", "role")),
+                    ("npu_budget", "kokoro_worker_npu_mem_budget_mb",
+                     GaugeMetricFamily, "NPU worker 预算 MB", ("worker", "role")),
+                    ("npu_context", "kokoro_worker_npu_mem_context_mb",
+                     GaugeMetricFamily, "CANN 上下文估算 MB", ("worker", "role")),
+                    ("npu_card", "kokoro_worker_npu_mem_card_pct",
+                     GaugeMetricFamily, "估算占用/整卡 %", ("worker", "role")),
+                    ("npu_process", "kokoro_worker_npu_mem_process_mb",
+                     GaugeMetricFamily, "npu-smi 实测进程内存 MB", ("worker", "role")),
+                    ("npu_delta", "kokoro_worker_npu_mem_delta_mb",
+                     GaugeMetricFamily, "实测 - planned MB（正=公式低估）",
+                     ("worker", "role")),
+                    ("npu_ctx_actual", "kokoro_worker_npu_mem_context_actual_mb",
+                     GaugeMetricFamily, "实测 - torch reserved MB（实际非 torch 开销）",
+                     ("worker", "role")),
+                    ("npu_limit", "kokoro_worker_npu_mem_limit_mb",
+                     GaugeMetricFamily, "fraction 允许的进程上限 MB（1.05×budget+context）",
+                     ("worker", "role")),
+                    ("cache_hits", "kokoro_g2p_cache_hits_total", CounterMetricFamily,
+                     "g2p 缓存命中", ("worker",)),
+                    ("cache_misses", "kokoro_g2p_cache_misses_total", CounterMetricFamily,
+                     "g2p 缓存未命中", ("worker",)),
+                    # 灰度期观察 fp16 流量占比（按批计；0 不输出）
+                    ("fp16_batches", "kokoro_worker_fp16_batches_total",
+                     CounterMetricFamily, "fp16 前向批数", ("worker",)),
+                    # asr 批推可观测：生效档与安全补丁状态（0=未装→已自动降单条）
+                    ("batch_effective", "kokoro_worker_batch_effective",
+                     GaugeMetricFamily, "ASR 批推生效批宽", ("worker", "role")),
+                    ("batch_patch", "kokoro_worker_batch_patch_ok",
+                     GaugeMetricFamily, "ASR 批推安全补丁状态（1=已安装）",
+                     ("worker", "role")))}
 
             # per-worker：直接消费 _collect() 的指标行（与 /health 同源同值，
             # 杜绝二次推导漂移）；npu/stuck/cache 补充自原始快照
             raw_by_tag = {w.get("wtag"): w for w in data["workers_raw"]}
             for row in data["workers"]:
-                tag, role = row.get("wtag") or f"{row.get('role')}-?", row.get("role") or "?"
+                tag = row.get("wtag") or f"{row.get('role')}-?"
+                role = row.get("role") or "?"
                 if row.get("done"):
-                    done.add_metric([tag, role], row["done"])
+                    W["done"].add_metric([tag, role], row["done"])
                 if row.get("err"):
-                    err.add_metric([tag, role], row["err"])
+                    W["err"].add_metric([tag, role], row["err"])
                 if row.get("avg_ms") is not None:
-                    wavg.add_metric([tag, role], row["avg_ms"])
-                ready_g.add_metric([tag, role], 1 if row.get("ready") else 0)
+                    W["avg_ms"].add_metric([tag, role], row["avg_ms"])
+                W["ready"].add_metric([tag, role], 1 if row.get("ready") else 0)
                 if row.get("realtime_x") is not None:
-                    rtx.add_metric([tag], row["realtime_x"])
+                    W["realtime_x"].add_metric([tag], row["realtime_x"])
                 if row.get("batch_effective") is not None:
-                    batch_eff.add_metric([tag, role], row["batch_effective"])
+                    W["batch_effective"].add_metric([tag, role], row["batch_effective"])
                 if row.get("batch_patch_ok") is not None:
-                    batch_patch.add_metric(
+                    W["batch_patch"].add_metric(
                         [tag, role], 1 if row["batch_patch_ok"] else 0)
                 w_raw = raw_by_tag.get(tag) or {}
                 st = w_raw.get("stats") or {}
-                for key, fam in (("cache_hits", gh), ("cache_misses", gm)):
+                for key in ("cache_hits", "cache_misses"):
                     if st.get(key):
-                        fam.add_metric([tag], st[key])
+                        W[key].add_metric([tag], st[key])
                 if role == "tts" and st.get("fp16_jobs"):
-                    fp16b.add_metric([tag], st["fp16_jobs"])
-                # tts/asr 同一套内存明细（旧 worker 只有 reserved/budget_pct
-                # 时新指标自动缺省，不产生 0 值误导）
+                    W["fp16_batches"].add_metric([tag], st["fp16_jobs"])
+                # tts/asr 同一套内存明细（worker 快照缺哪项该指标自动缺省，
+                # 不产生 0 值误导）
                 nm = w_raw.get("npu_mem") or {}
                 if nm.get("reserved_mb") is not None:
-                    npu_r.add_metric([tag], nm["reserved_mb"])
+                    W["npu_reserved"].add_metric([tag], nm["reserved_mb"])
                 if nm.get("budget_pct") is not None:
-                    npu_p.add_metric([tag], nm["budget_pct"])
-                for key, fam in (("allocated_mb", npu_alloc),
-                                 ("estimated_mb", npu_est),
-                                 ("planned_mb", npu_plan),
-                                 ("budget_mb", npu_budget),
-                                 ("context_mb", npu_ctx),
-                                 ("card_pct", npu_card),
-                                 ("process_mb", npu_proc),
-                                 ("delta_mb", npu_delta),
-                                 ("context_actual_mb", npu_ctx_actual),
-                                 ("limit_mb", npu_limit)):
+                    W["npu_budget_pct"].add_metric([tag], nm["budget_pct"])
+                for key, short in (("allocated_mb", "npu_allocated"),
+                                   ("estimated_mb", "npu_estimated"),
+                                   ("planned_mb", "npu_planned"),
+                                   ("budget_mb", "npu_budget"),
+                                   ("context_mb", "npu_context"),
+                                   ("card_pct", "npu_card"),
+                                   ("process_mb", "npu_process"),
+                                   ("delta_mb", "npu_delta"),
+                                   ("context_actual_mb", "npu_ctx_actual"),
+                                   ("limit_mb", "npu_limit")):
                     if nm.get(key) is not None:
-                        fam.add_metric([tag, role], nm[key])
+                        W[short].add_metric([tag, role], nm[key])
                 if w_raw.get("stuck_s"):
-                    stuck.add_metric([tag], w_raw["stuck_s"])
+                    W["stuck"].add_metric([tag], w_raw["stuck_s"])
             # 崩溃计数来自 supervisor 快照映射（不随 worker 心跳上报）
             for wtag, n_crash in (data.get("crashes") or {}).items():
                 if n_crash:
-                    crashes.add_metric([wtag], n_crash)
-            yield done
-            yield err
-            yield crashes
-            yield ready_g
-            yield rtx
-            yield wavg
-            yield stuck
-            yield npu_r
-            yield npu_p
-            yield npu_alloc
-            yield npu_est
-            yield npu_plan
-            yield npu_budget
-            yield npu_ctx
-            yield npu_card
-            yield npu_proc
-            yield npu_delta
-            yield npu_ctx_actual
-            yield npu_limit
-            yield gh
-            yield gm
-            yield fp16b
-            yield batch_eff
-            yield batch_patch
+                    W["crashes"].add_metric([wtag], n_crash)
+            yield from W.values()
 
             shm = data.get("shm")
             if shm:
-                g = GaugeMetricFamily("kokoro_shm_used_mb", "/dev/shm 已用 MB")
-                g.add_metric([], shm["used_mb"])
-                yield g
-                g = GaugeMetricFamily("kokoro_shm_total_mb", "/dev/shm 总量 MB")
-                g.add_metric([], shm["total_mb"])
-                yield g
-                g = GaugeMetricFamily("kokoro_shm_pct", "/dev/shm 水位百分比")
-                g.add_metric([], shm["pct"])
-                yield g
+                for key, doc in (("used_mb", "/dev/shm 已用 MB"),
+                                 ("total_mb", "/dev/shm 总量 MB"),
+                                 ("pct", "/dev/shm 水位百分比")):
+                    g = GaugeMetricFamily(f"kokoro_shm_{key}", doc)
+                    g.add_metric([], shm[key])
+                    yield g
             g = GaugeMetricFamily("kokoro_degraded", "降级状态 0/1")
             g.add_metric([], 1 if data["status"] == "degraded" else 0)
             yield g
@@ -1327,39 +1265,27 @@ async def _synth(text: str, voice: str, speed: float, needs_align: bool,
     # 断连取消：客户端断开 → 立即摘除本请求状态（后续 synth_part/chunk_ts
     # 走既有孤儿路径被丢弃）→ 写 CANCEL 标记（tts 认领后前向前过滤），
     # 已派发的批无法撤回但结果会被网关丢弃，不再浪费编码/对齐。
-    poll_task = None
-    if request is not None:
-        async def _watch_disconnect() -> None:
-            try:
-                while not await request.is_disconnected():
-                    await asyncio.sleep(0.5)
-            except asyncio.CancelledError:
-                raise
-            except Exception:  # noqa: BLE001  探测异常 ≠ 已断连：直接退出
-                # watcher（不取消请求——落穿会把活连接误判 499），该请求由
-                # 正常超时/完成路径收尾；watcher 死了只损失"提前取消"能力
-                log.exception("disconnect watcher probe error (watcher exits, request continues)")
-                return
-            if fut.done():
-                return
-            _pending.pop(("req", req_id), None)
-            _pending.pop(("ts", req_id), None)
-            _request_meta.pop(req_id, None)
-            abandoned = _agg_state.pop(req_id, None)   # 已聚合块即时回收
-            if abandoned:
-                _unlink_blocks(abandoned["blocks"])
-            try:
-                proc_common.cancel_add(req_id)   # g2p 推送前 / tts 前向前检查跳过
-            except Exception as exc:  # noqa: BLE001  redis 抖动：标记尽力而为，
-                # 不能让 watcher 任务死掉——否则 fut 永不 resolve，请求白等到截止线
-                log.warning("req=%s cancel_add failed (disconnect path, ignored): %s",
-                            req_id, exc)
-            _entry_stats["cancelled"] = _entry_stats.get("cancelled", 0) + 1
-            log.info("req=%s client disconnected, request cancelled", req_id)
-            if not fut.done():
-                fut.set_exception(_ClientGone("客户端已断开"))
+    async def _on_client_gone() -> None:
+        if fut.done():
+            return
+        _pending.pop(("req", req_id), None)
+        _pending.pop(("ts", req_id), None)
+        _request_meta.pop(req_id, None)
+        abandoned = _agg_state.pop(req_id, None)   # 已聚合块即时回收
+        if abandoned:
+            _unlink_blocks(abandoned["blocks"])
+        try:
+            proc_common.cancel_add(req_id)   # g2p 推送前 / tts 前向前检查跳过
+        except Exception as exc:  # noqa: BLE001  redis 抖动：标记尽力而为，
+            # 不能让 watcher 任务死掉——否则 fut 永不 resolve，请求白等到截止线
+            log.warning("req=%s cancel_add failed (disconnect path, ignored): %s",
+                        req_id, exc)
+        _entry_stats["cancelled"] = _entry_stats.get("cancelled", 0) + 1
+        log.info("req=%s client disconnected, request cancelled", req_id)
+        if not fut.done():
+            fut.set_exception(_ClientGone("客户端已断开"))
 
-        poll_task = loop.create_task(_watch_disconnect())
+    poll_task = _watch_disconnect_task(loop, request, _on_client_gone)
 
     from multiprocessing import shared_memory
 
@@ -1549,7 +1475,63 @@ def _log_request_text(req_id: str, text: str) -> None:
     log.info("req=%s chars=%d text=%s", req_id, len(text), flat)
 
 
-_MAX_BODY_BYTES = proc_common.env_int("MAX_BODY_BYTES", 4 * 2**20, minimum=1024)
+def _validate_request(text_raw, g2p_overrides, dtype_raw, voice_raw,
+                      label: str, err):
+    """端点输入校验的单一实现（/v1 与 /tts 同规则，仅字段名与异常类型不同）：
+    空/超长文本、g2p_overrides/dtype 合法性、voice 缺省。
+    err 为异常工厂（HTTPException / BizError）。返回 (text, overrides, dtype, voice)。"""
+    if text_raw is None:
+        raise err(400, f"缺少 {label} 参数")
+    text = text_raw.strip()
+    if not text:
+        raise err(400, f"{label} 不能为空")
+    if len(text) > _max_chars:
+        raise err(400, f"{label} 超长({len(text)} > {_max_chars} 字符)，请分段请求")
+    try:
+        overrides = protocol.normalize_overrides(g2p_overrides)
+        dtype = protocol.normalize_dtype(dtype_raw)
+    except ValueError as exc:
+        raise err(400, str(exc))
+    return text, overrides, dtype, (voice_raw or _default_voice).strip()
+
+
+def _watch_disconnect_task(loop, request, on_fire):
+    """断连探测 watcher 公共骨架（_synth 音频段与 /tts 对齐段共用）：
+    0.5s 轮询 is_disconnected，断连时执行 on_fire()。探测异常 ≠ 已断连：
+    直接退出不误判（落穿会把活连接判 499），该请求由正常超时/完成路径
+    收尾；watcher 死了只损失"提前取消"能力。request 为 None（测试直调）
+    返回 None。"""
+    if request is None:
+        return None
+
+    async def _watch() -> None:
+        try:
+            while not await request.is_disconnected():
+                await asyncio.sleep(0.5)
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001
+            log.exception(
+                "disconnect watcher probe error (watcher exits, request continues)")
+            return
+        await on_fire()
+
+    return loop.create_task(_watch())
+
+
+def _log_request_done(ep: str, rid: str, voice: str, speed: float,
+                      audio_s: float, e2e_s: float, agg_s: float,
+                      enc_s: float) -> None:
+    """成功收尾（results 计数 + 单行汇总）：/v1 与 /tts 同格式同口径。
+    只带网关独有字段——批/句级明细（排队、前向、对齐）由 tts/asr worker
+    的 bid=/chunk= 行承担——grep <req_id> 串全程，grep <bid> 看批次构成。"""
+    _entry_stats["results"] += 1   # 成功口径 = 完整响应体已就绪（/tts = 音频+对齐+编码全部完成）
+    log.info("ep=%s req=%s voice=%s speed=%.2f audio_s=%.1f e2e_s=%.2f "
+             "agg_ms=%.0f enc_ms=%.0f",
+             ep, rid, voice, speed, audio_s, e2e_s, agg_s * 1000, enc_s * 1000)
+
+
+_MAX_BODY_BYTES = proc_common.env_int("MAX_BODY_BYTES", minimum=1024)
 
 
 class _BodySizeLimitMiddleware:
@@ -1619,17 +1601,9 @@ class SpeechRequest(BaseModel):
 @app.post("/v1/audio/speech")
 async def create_speech(req: SpeechRequest, request: Request = None):
     t_e2e = time.perf_counter()   # e2e 起点：进处理函数（校验/排队/合成/编码全程）
-    text = req.input.strip()
-    if not text:
-        raise HTTPException(400, "input 不能为空")
-    if len(text) > _max_chars:
-        raise HTTPException(400, f"input 超长({len(text)} > {_max_chars} 字符)，请分段请求")
-    try:
-        overrides = protocol.normalize_overrides(req.g2p_overrides)
-        dtype = protocol.normalize_dtype(req.dtype)
-    except ValueError as exc:
-        raise HTTPException(400, str(exc))
-    voice = (req.voice or _default_voice).strip()
+    text, overrides, dtype, voice = _validate_request(
+        req.input, req.g2p_overrides, req.dtype, req.voice,
+        label="input", err=HTTPException)
 
     t0 = time.perf_counter()
     try:
@@ -1669,13 +1643,8 @@ async def create_speech(req: SpeechRequest, request: Request = None):
     except RuntimeError as exc:
         raise HTTPException(500, str(exc))
     enc_s = time.perf_counter() - t_enc
-    _entry_stats["results"] += 1   # 成功口径 = 完整响应体已就绪（非仅音频到达）
-    # 单行汇总：只带网关独有字段（同 /tts done 口径）——批/句级明细由
-    # tts worker 的 bid=/chunk= 行承担
-    log.info("ep=/v1 req=%s voice=%s speed=%.2f audio_s=%.1f e2e_s=%.2f "
-             "agg_ms=%.0f enc_ms=%.0f",
-             rid, voice, req.speed, duration,
-             time.perf_counter() - t_e2e, agg_s * 1000, enc_s * 1000)
+    _log_request_done("/v1", rid, voice, req.speed, duration,
+                      time.perf_counter() - t_e2e, agg_s, enc_s)
 
     return Response(
         content=body,
@@ -1725,22 +1694,14 @@ _asr_ready_cache = {"ts": 0.0, "val": False}
 
 def _scan_asr_ready() -> bool:
     """健康目录里是否有就绪的 asr 工人（/tts 快速失败，避免对齐单永悬挂）。"""
-    try:
-        for name in os.listdir(_health_dir):
-            if not name.startswith("worker-"):
-                continue
-            path = os.path.join(_health_dir, name)
-            try:
-                if time.time() - os.path.getmtime(path) > _HEALTH_STALE_AFTER:
-                    continue
-                with open(path, encoding="utf-8") as f:
-                    w = json.load(f)
-                if w.get("role") == "asr" and (w.get("warm") or {}).get("funasr") == "ok":
-                    return True
-            except (OSError, ValueError):
-                continue
-    except OSError:
-        pass
+    for _name, path, _age in _health_dir_entries():
+        try:
+            with open(path, encoding="utf-8") as f:
+                w = json.load(f)
+        except (OSError, ValueError):
+            continue
+        if w.get("role") == "asr" and (w.get("warm") or {}).get("funasr") == "ok":
+            return True
     return False
 
 
@@ -1766,19 +1727,9 @@ async def tts_business(req: TTSRequest, request: Request = None):
     """
     t_e2e = time.perf_counter()   # e2e 起点：进处理函数（校验/排队/合成/对齐/编码全程）
     deadline = t_e2e + _entry_wait_s   # 单一请求级截止线：音频+对齐共享预算
-    if req.text is None:
-        raise BizError(400, "缺少 text 参数")
-    text = req.text.strip()
-    if not text:
-        raise BizError(400, "text 不能为空")
-    if len(text) > _max_chars:
-        raise BizError(400, f"text 超长({len(text)} > {_max_chars} 字符)，请分段请求")
-    try:
-        overrides = protocol.normalize_overrides(req.g2p_overrides)
-        dtype = protocol.normalize_dtype(req.dtype)
-    except ValueError as exc:
-        raise BizError(400, str(exc))
-    voice = (req.voice or _default_voice).strip()
+    text, overrides, dtype, voice = _validate_request(
+        req.text, req.g2p_overrides, req.dtype, req.voice,
+        label="text", err=BizError)
 
     if not _asr_ready():
         raise BizError(503, "时间戳服务暂不可用（asr 池未就绪），请稍后重试")
@@ -1803,19 +1754,11 @@ async def tts_business(req: TTSRequest, request: Request = None):
         # 取消，此后的对齐等待（长文本可达几十秒）原感知不到断开——现在
         # 立即 499 释放连接与受理额度（对齐/asr 已派发部分照旧算完，结果
         # 按孤儿丢弃）
-        ts_poll = None
-        if request is not None:
-            async def _watch_ts_disconnect() -> None:
-                try:
-                    while not await request.is_disconnected():
-                        await asyncio.sleep(0.5)
-                except asyncio.CancelledError:
-                    raise
-                except Exception:  # noqa: BLE001  探测异常≠断连：退出不误判
-                    return
-                if not fut_ts.done():
-                    fut_ts.set_exception(_ClientGone("客户端已断开"))
-            ts_poll = asyncio.get_running_loop().create_task(_watch_ts_disconnect())
+        async def _on_ts_client_gone() -> None:
+            if not fut_ts.done():
+                fut_ts.set_exception(_ClientGone("客户端已断开"))
+
+        ts_poll = _watch_disconnect_task(loop, request, _on_ts_client_gone)
         try:
             # 对齐段用剩余预算（单一截止线）：音频耗掉多少，对齐就只剩多少
             ts = await asyncio.wait_for(
@@ -1879,19 +1822,10 @@ async def tts_business(req: TTSRequest, request: Request = None):
                 _encode_wav(audio)).decode("utf-8")},
             ensure_ascii=False).encode("utf-8"))
     enc_cost = time.perf_counter() - t1
-    _entry_stats["results"] += 1   # /tts 成功口径 = 音频+对齐+编码全部完成
-
-    # 单行汇总（原为多行 print 含完整文本——绕过日志级别且打 PII 全文）。
-    # 只带网关独有字段：e2e_s（受理→响应全程）、agg_ms/enc_ms（网关本地
-    # 开销）、audio_s（聚合产物）、voice/speed（请求参数）。批/句级明细
-    # （排队、前向、对齐）由 tts/asr worker 的 bid=/chunk= 行承担——
-    # grep <req_id> 串全程，grep <bid> 看批次构成。
     _record_latency(tts_cost, len(req.text))  # 延迟直方图口径不变 = 合成+对齐全程
-    log.info("ep=%s req=%s voice=%s speed=%.2f audio_s=%.1f e2e_s=%.2f "
-             "agg_ms=%.0f enc_ms=%.0f",
-             request.url.path if request is not None else "/tts",
-             req_id, voice, req.speed, duration,
-             time.perf_counter() - t_e2e, agg_s * 1000, enc_cost * 1000)
+    _log_request_done(request.url.path if request is not None else "/tts",
+                      req_id, voice, req.speed, duration,
+                      time.perf_counter() - t_e2e, agg_s, enc_cost)
     _log_request_text(req_id, text)
 
     return Response(content=body, media_type="application/json",
@@ -1975,7 +1909,7 @@ def gateway_main(i: int, port: int, g2p_queue, result_q) -> None:
     sock.listen(2048)
     config = uvicorn.Config(app, log_level=proc_common.log_level_name(),
                             timeout_keep_alive=proc_common.env_int(
-                                "KEEP_ALIVE_TIMEOUT_S", 0, minimum=0),
+                                "KEEP_ALIVE_TIMEOUT_S", minimum=0),
                             # 优雅退出上限 4s < supervisor join(5)：在途响应
                             # 自己收干净，避免 5s 后被 SIGKILL 硬切
                             timeout_graceful_shutdown=4)

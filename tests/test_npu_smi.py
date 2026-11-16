@@ -139,7 +139,8 @@ def test_smi_process_mb_cache_and_fallback(monkeypatch):
             return "Process id:967120 Process name:python3 Process memory(MB):9683"
         return ""
 
-    monkeypatch.setattr(pipeline, "_run_smi", _run)
+    monkeypatch.setattr(pipeline, "_run_cmd",
+                        lambda cmd, t, warn="": _run(cmd))
     monkeypatch.setattr(pipeline, "_pid_candidates", lambda: {967120})
     monkeypatch.setattr(pipeline, "_SMI_PROC_CACHE",
                         {"ts": 0.0, "pid": None, "dev": None, "mb": None})
@@ -158,7 +159,8 @@ def test_smi_process_mb_negative_cache(monkeypatch):
         calls.append(tuple(cmd))
         return ""
 
-    monkeypatch.setattr(pipeline, "_run_smi", _run)
+    monkeypatch.setattr(pipeline, "_run_cmd",
+                        lambda cmd, t, warn="": _run(cmd))
     monkeypatch.setattr(pipeline, "_pid_candidates", lambda: {967120})
     monkeypatch.setattr(pipeline, "_SMI_PROC_CACHE",
                         {"ts": 0.0, "pid": None, "dev": None, "mb": None})

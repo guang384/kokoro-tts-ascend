@@ -379,9 +379,10 @@ def test_shm_usage_exposed(gw, monkeypatch):
         "mailboxes": {}})
     d = gateway._collect()
     total = round(4096 * 256 / 2**20, 1)          # 1.0 MiB
-    used = round(4096 * (256 - 64) / 2**20, 1)    # 0.75 MiB
+    used = round(4096 * (256 - 64) / 2**20, 1)    # 0.75 MiB（round 后 0.8）
     assert d["shm"] == {"total_mb": total, "used_mb": used,
-                        "pct": round(used / total * 100, 1)}
+                        "total_bytes": 4096 * 256,
+                        "pct": 75.0}   # pct 用原始字节算（192/256），不用舍入后的 MB
 
 
 

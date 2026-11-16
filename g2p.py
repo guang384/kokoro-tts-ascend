@@ -18,12 +18,12 @@ import protocol
 
 log = proc_common.setup_logging(os.getenv("WORKER_TAG", "g2p"))
 
-G2P_WORKERS = proc_common.env_int("G2P_WORKERS", 2, minimum=1)   # 进程数（supervisor 用；此处仅作线程数默认值）
+G2P_WORKERS = proc_common.env_int("G2P_WORKERS", minimum=1)   # 进程数（supervisor 用；此处仅作线程数默认值）
 _G2P_THREADS = proc_common.env_int("G2P_THREADS", G2P_WORKERS, minimum=1)  # 本进程音素化线程池大小（默认随进程数）
-_max_chunk = proc_common.env_int("TTS_CHUNK_CHARS", 120, minimum=8)
-_speed_floor = proc_common.env_float("TTS_SPEED_FLOOR", 0.5, minimum=0.1)
+_max_chunk = proc_common.env_int("TTS_CHUNK_CHARS", minimum=8)
+_speed_floor = proc_common.env_float("TTS_SPEED_FLOOR", minimum=0.1)
 _CHUNK_SEC_PER_CHAR = 17.5 / 80.0   # 0.21875s/字@speed1.0（17.5帧/token 校准 ÷80fps，memcalc 同锚点）
-_g2p_cache_size = proc_common.env_int("G2P_CACHE_SIZE", 4096, minimum=0)
+_g2p_cache_size = proc_common.env_int("G2P_CACHE_SIZE", minimum=0)
 _SENT_RE = re.compile(r"[^。！？!?；;\n]+(?:[。！？!?；;]+|\n+|$)")
 _started_at = time.time()
 _stats = {"requests": 0, "chunks": 0, "g2p_ms": 0.0, "errors": 0,
@@ -165,22 +165,17 @@ def main(idx: int, g2p_queue, tts_queue, gateway_queues) -> None:
                           "stuck_s": _busy.stuck_s(),
                           "warm": dict(_warm), "stats": _stats_snapshot()},
     )
-    # 初始化失败驻留重试（指数退避 5s→120s）：失败瞬态（依赖/资源未就绪）
-    # 可自愈，不再永久躺平——get_g2p 只在成功后缓存单例，重试安全
-    g2p = None
-    _init_delay = 5.0
-    while g2p is None:
-        try:
-            g2p = pipeline.get_g2p()
-            g2p.phonemize("你好。")  # 预热（jieba 词典/misaki 首载）
-            _warm["g2p"] = "ok"
-            log.info("G2P text engine ready")
-        except Exception as exc:  # noqa: BLE001
-            _warm["g2p"] = "fail"
-            log.error("G2P init failed, retry in %.0fs (warm=fail visible in /health): %s",
-                      _init_delay, str(exc)[:200])
-            time.sleep(_init_delay)
-            _init_delay = min(_init_delay * 2, 120.0)
+    # 初始化失败驻留重试（proc_common.retry_forever 共用骨架）：失败瞬态
+    # （依赖/资源未就绪）可自愈，不再永久躺平——get_g2p 只在成功后缓存
+    # 单例，重试安全
+    def _init():
+        g2p = pipeline.get_g2p()
+        g2p.phonemize("你好。")  # 预热（jieba 词典/misaki 首载）
+        _warm["g2p"] = "ok"
+        log.info("G2P text engine ready")
+        return g2p
+
+    g2p = proc_common.retry_forever(_init, "g2p", _warm, "G2P", log)
 
     pool = ThreadPoolExecutor(max_workers=_G2P_THREADS, thread_name_prefix="g2p")
     _ph_cache = make_phonemizer(g2p, _g2p_cache_size)

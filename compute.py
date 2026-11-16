@@ -27,9 +27,9 @@ import protocol
 _mem_log = logging.getLogger("kokoro.compute")
 
 _started_at = time.time()
-SAMPLE_RATE = proc_common.env_int("KOKORO_SAMPLE_RATE", 24000, minimum=8000)
-_MAX_BATCH = proc_common.env_int("TTS_MAX_BATCH_SIZE", 8, minimum=1)
-_ASR_MAX_BATCH = proc_common.env_int("ASR_MAX_BATCH_SIZE", 8, minimum=1)  # asr 批认领上限（显存预算 pipeline._asr_auto_budget_mb 随它缩放）
+SAMPLE_RATE = proc_common.env_int("KOKORO_SAMPLE_RATE", minimum=8000)
+_MAX_BATCH = proc_common.env_int("TTS_MAX_BATCH_SIZE", minimum=1)
+_ASR_MAX_BATCH = proc_common.env_int("ASR_MAX_BATCH_SIZE", minimum=1)  # asr 批认领上限（显存预算 pipeline._asr_auto_budget_mb 随它缩放）
 _busy = proc_common.BusyWatch()  # 推理卡死看门狗：任务取出→enter，处理完→exit
 # stats 每进程仅一个角色在跑，共用一份无妨。**全部键必须预置**：心跳线程
 # 用 dict(_stats) 快照，主循环中途首插新键会触发 "dictionary changed size
@@ -72,57 +72,47 @@ def _with_busy(fn):
 
 
 def _load_compute(tag: str):
-    """KModel 加载+冒烟（仅 tts 池）。失败驻留重试（指数退避 5s→120s）。
-
-    看门狗 SIGKILL 前代工人后，NPU 显存回收有延迟、aicore 可能短暂坏态
-    ——立即重生再初始化会失败。原"失败永久驻留不重试"会让一次坏态变成
-    整池永久死亡（生产事故 20261108：6/6 tts 全部 warm=fail 僵尸、零容量，
-    认领队列顶满全服务堵塞）。get_compute 只在成功后缓存单例，
-    重试安全。
-
-    **不降级**（fail-fast）：持续失败保持 warm=fail → /health 503 →
-    编排层（K8s liveness）重启容器换取全新 NPU 上下文；悄悄降级 CPU 会
-    把"卡坏了"伪装成"还能跑"，掩盖故障。"""
+    """KModel 加载+冒烟（仅 tts 池）。失败驻留重试（proc_common.retry_forever
+    骨架，tts/asr/g2p 共用）。get_compute 只在成功后缓存单例，重试安全。"""
     import pipeline
 
     log = proc_common.setup_logging(tag)
     log.info("compute starting")
-    delay = 5.0
-    while True:
-        try:
-            compute = _with_busy(pipeline.get_compute)  # 探测+预算+预占+加载
-            _with_busy(compute.synth_batch_smoke)
-            _tts_warm["kokoro"] = "ok"
-            log.info("compute engine ready: device=%s", compute.device)
-            return compute
-        except Exception as exc:  # noqa: BLE001
-            _tts_warm["kokoro"] = "fail"
-            log.error("compute engine init failed, retry in %.0fs (warm=fail"
-                      " → /health 503 → orchestration restarts container): %s",
-                      delay, str(exc)[:200])
-            time.sleep(delay)
-            delay = min(delay * 2, 120.0)
+
+    def _init():
+        compute = _with_busy(pipeline.get_compute)  # 探测+预算+预占+加载
+        _with_busy(compute.synth_batch_smoke)
+        _tts_warm["kokoro"] = "ok"
+        log.info("compute engine ready: device=%s", compute.device)
+        return compute
+
+    return proc_common.retry_forever(_init, "kokoro", _tts_warm,
+                                     "compute engine", log)
 
 
 
 
-def _tts_snapshot(state: dict) -> dict:
-    """tts 心跳快照：device/warm/stats + NPU 占用 + 看门狗（/health 诊断用）。
+def _snapshot_base(role: str, device, ready: bool, warm: dict,
+                   extra_stats: dict) -> dict:
+    """心跳快照公共骨架（tts/asr 共用）：device/warm/stats + NPU 占用 +
+    看门狗（/health 诊断用）。
 
     注意：本函数在心跳线程运行，**绝不能调 torch.npu API**——设备坏态时
     副线程碰 NPU 会被 SIGBUS 直接杀进程（生产事故 20261109：5 个空闲
     tts worker 的心跳线程相继被带走）。占用数据由主循环每次前向后采样
-    写入 _stats["npu_mem"]，这里只读缓存值。"""
-    out = {"role": "tts", "device": state["device"],
-           "ready": _tts_warm.get("kokoro") == "ok",
-           "uptime_s": round(time.time() - _started_at, 1),
-           "stuck_s": _busy.stuck_s(),
-           "warm": dict(_tts_warm),
-           "stats": {**dict(_stats), "ipc_dropped": protocol.drop_count()},
-           "npu_mem": None}
-    if _stats.get("npu_mem") is not None:
-        out["npu_mem"] = _stats["npu_mem"]  # 主循环采样（非实时，5s 心跳粒度）
-    return out
+    写入 _stats["npu_mem"]，这里只读缓存值（非实时，5s 心跳粒度）。"""
+    return {"role": role, "device": device, "ready": ready,
+            "uptime_s": round(time.time() - _started_at, 1),
+            "stuck_s": _busy.stuck_s(),
+            "warm": dict(warm),
+            "stats": {**dict(_stats), "ipc_dropped": protocol.drop_count(),
+                      **extra_stats},
+            "npu_mem": _stats.get("npu_mem")}
+
+
+def _tts_snapshot(state: dict) -> dict:
+    return _snapshot_base("tts", state["device"],
+                          _tts_warm.get("kokoro") == "ok", _tts_warm, {})
 
 
 def _log_mem_sample(mem: dict, prev: dict | None) -> None:
@@ -147,56 +137,52 @@ def _log_mem_sample(mem: dict, prev: dict | None) -> None:
         mem.get("estimated_mb", 0.0), planned, delta, ctx_actual)
 
 
-def _sample_npu_mem(compute) -> None:
-    """主循环采样 tts worker 的 NPU 内存进 _stats——只有主线程碰 NPU API。
+def _sample_worker_npu_mem(dev: str, budget, context_mb: float,
+                           budget_err_fn) -> None:
+    """主循环采样 worker 的 NPU 内存进 _stats（tts/asr 同一估算口径）——
+    只有主线程碰 NPU API，心跳线程只读 _stats["npu_mem"]。
 
     估算口径由 pipeline.estimate_worker_mem 统一：reserved（torch 缓存池）
-    + CANN 上下文常量（tts 450），并给出预算/整卡占比。心跳线程只读
-    _stats["npu_mem"]。
+    + CANN 上下文常量（tts 450 / asr 153），并给出预算/整卡占比。
 
     **仅 NPU 设备启用**：非 NPU（显式 DEVICE=cpu/测试替身/无驱动容器）直接跳过
     ——torch_npu 在无驱动环境调用会在 C 层段错误，except 拦不住
     （20261109 镜像内验证 Segmentation fault 的根因）。"""
-    dev = str(getattr(compute, "device", "") or "")
-    if not dev.startswith("npu"):
+    if not str(dev or "").startswith("npu"):
         return
     try:
         import pipeline
 
-        budget = pipeline._last_budget[0] if pipeline._last_budget else None
         prev = _stats.get("npu_mem")
-        mem = pipeline.npu_mem_estimate(dev, budget, pipeline.TTS_CONTEXT_MB)
+        mem = pipeline.npu_mem_estimate(str(dev), budget, context_mb)
         if mem is not None:
             _stats["npu_mem"] = mem
             _log_mem_sample(mem, prev)
-        if pipeline.budget_error():
-            _stats["budget_error"] = pipeline.budget_error()
+        err = budget_err_fn()
+        if err:
+            _stats["budget_error"] = err
     except Exception:  # noqa: BLE001  采样失败不影响服务
         pass
+
+
+def _sample_npu_mem(compute) -> None:
+    import pipeline
+
+    _sample_worker_npu_mem(
+        getattr(compute, "device", ""),
+        pipeline._last_budget[0] if pipeline._last_budget else None,
+        pipeline.TTS_CONTEXT_MB, pipeline.budget_error)
 
 
 def _sample_asr_mem() -> None:
-    """主循环采样 asr worker 的 NPU 内存（与 tts 同一估算口径）。
-
-    asr 不跑批量前向之外的持续负载，采样点放在加载完成与每批推理之后；
+    """asr 不跑批量前向之外的持续负载，采样点放在加载完成与每批推理之后；
     空闲期沿用最后一次快照（内存预占恒定，不会漂移）。"""
-    dev = str(_asr_state.get("device") or "")
-    if not dev.startswith("npu"):
-        return
-    try:
-        import pipeline
+    import pipeline
 
-        meta = pipeline.asr_budget_meta()
-        budget = meta[0] if meta else None
-        prev = _stats.get("npu_mem")
-        mem = pipeline.npu_mem_estimate(dev, budget, pipeline.ASR_CONTEXT_MB)
-        if mem is not None:
-            _stats["npu_mem"] = mem
-            _log_mem_sample(mem, prev)
-        if pipeline.asr_budget_error():
-            _stats["budget_error"] = pipeline.asr_budget_error()
-    except Exception:  # noqa: BLE001  采样失败不影响服务
-        pass
+    meta = pipeline.asr_budget_meta()
+    _sample_worker_npu_mem(_asr_state.get("device"),
+                           meta[0] if meta else None,
+                           pipeline.ASR_CONTEXT_MB, pipeline.asr_budget_error)
 
 
 def _chunk_key(x: dict) -> str:
@@ -491,61 +477,49 @@ def _asr_snapshot() -> dict:
             return None if st is None else bool(st.get("ok"))
         except Exception:  # noqa: BLE001
             return None
-    return {"role": "asr", "device": _asr_state["device"],
-            "ready": _asr_warm.get("funasr") == "ok",
-            "uptime_s": round(time.time() - _started_at, 1),
-            "stuck_s": _busy.stuck_s(),
-            "warm": dict(_asr_warm),
-            "npu_mem": _stats.get("npu_mem"),
-            "stats": {**dict(_stats), "ipc_dropped": protocol.drop_count(),
-                      "batch_effective": _effective(),
-                      "batch_patch_ok": _patch_ok()}}
+    return _snapshot_base("asr", _asr_state["device"],
+                          _asr_warm.get("funasr") == "ok", _asr_warm,
+                          {"batch_effective": _effective(),
+                           "batch_patch_ok": _patch_ok()})
 
 
 _asr_state = {"device": None}
 
 
 def _load_asr(log):
-    """FunASR 加载+冒烟（仅 asr 池）。失败驻留重试（指数退避），不降级
-    （同 tts 池 fail-fast 语义）。返回实际设备字符串。"""
+    """FunASR 加载+冒烟（仅 asr 池）。失败驻留重试（proc_common.retry_forever
+    骨架，同 tts 池 fail-fast 语义）。返回实际设备字符串。"""
     import funasr_ts
     import pipeline
 
-    delay = 5.0
-    while True:
-        try:
-            _model, used = _with_busy(funasr_ts.get_model)  # 失败直接抛（fail-fast）
-            if str(used).startswith("npu"):
-                _with_busy(lambda: pipeline.prime_asr_memory(used))  # 模型确已上卡才预占预算
-                # 无条件同步（成功为 None）：重试成功后必须清掉旧错误，
-                # 否则心跳永远假报预算失败。
-                _stats["budget_error"] = pipeline.asr_budget_error()
-            _asr_state["device"] = used or "cpu"
+    def _init():
+        _model, used = _with_busy(funasr_ts.get_model)  # 失败直接抛（fail-fast）
+        if str(used).startswith("npu"):
+            _with_busy(lambda: pipeline.prime_asr_memory(used))  # 模型确已上卡才预占预算
+            # 无条件同步（成功为 None）：重试成功后必须清掉旧错误，
+            # 否则心跳永远假报预算失败。
+            _stats["budget_error"] = pipeline.asr_budget_error()
+        _asr_state["device"] = used or "cpu"
 
-            def _smoke():
-                funasr_ts.group_timestamp(
-                    [0.1 * funasr_ts.np.ones(SAMPLE_RATE * 2, dtype="float32")],
-                    ["你好"], SAMPLE_RATE)  # 冒烟（NPU 推理：挂死风险点）
-            _with_busy(_smoke)
-            # 批推最坏形状热身（OOM 阶梯自降级，任何档位不抛——见
-            # funasr_ts.warmup_batch）：生效档入 warm/stats，认领量钳它。
-            # 必须热身完再置 ready：网关 _scan_asr_ready 只看 warm.funasr，
-            # 提前置 ok 会在热身期间放行 /tts，而 asr 还没进认领循环。
-            _with_busy(lambda: funasr_ts.warmup_batch(_ASR_MAX_BATCH))
-            _asr_warm["funasr"] = "ok"
-            _patch = funasr_ts.batch_patch_status()
-            log.info("FunASR ready (forced-alignment inference worker, device=%s,"
-                     " batch_effective=%d, batch_patch_ok=%s)",
-                     _asr_state["device"], funasr_ts.effective_batch(),
-                     _patch.get("ok") if _patch else None)
-            return _asr_state["device"]
-        except Exception as exc:  # noqa: BLE001
-            _asr_warm["funasr"] = "fail"
-            log.error("FunASR init failed, retry in %.0fs (warm=fail → /health"
-                      " 503 → orchestration restarts container): %s",
-                      delay, str(exc)[:200])
-            time.sleep(delay)
-            delay = min(delay * 2, 120.0)
+        def _smoke():
+            funasr_ts.group_timestamp(
+                [0.1 * funasr_ts.np.ones(SAMPLE_RATE * 2, dtype="float32")],
+                ["你好"], SAMPLE_RATE)  # 冒烟（NPU 推理：挂死风险点）
+        _with_busy(_smoke)
+        # 批推最坏形状热身（OOM 阶梯自降级，任何档位不抛——见
+        # funasr_ts.warmup_batch）：生效档入 warm/stats，认领量钳它。
+        # 必须热身完再置 ready：网关 _scan_asr_ready 只看 warm.funasr，
+        # 提前置 ok 会在热身期间放行 /tts，而 asr 还没进认领循环。
+        _with_busy(lambda: funasr_ts.warmup_batch(_ASR_MAX_BATCH))
+        _asr_warm["funasr"] = "ok"
+        _patch = funasr_ts.batch_patch_status()
+        log.info("FunASR ready (forced-alignment inference worker, device=%s,"
+                 " batch_effective=%d, batch_patch_ok=%s)",
+                 _asr_state["device"], funasr_ts.effective_batch(),
+                 _patch.get("ok") if _patch else None)
+        return _asr_state["device"]
+
+    return proc_common.retry_forever(_init, "funasr", _asr_warm, "FunASR", log)
 
 
 def _read_job_audio(job: dict):
@@ -605,6 +579,20 @@ def _reply_chunk_ts(job: dict, timestamp: list, error,
         _stats["job_drops"] += 1
 
 
+def _reply_chunk_ts_safe(job: dict, timestamp: list, error,
+                         gateway_queues, log, warn: str,
+                         bucket_ts=None) -> None:
+    """_reply_chunk_ts 的防御壳：畸形载荷/回投异常只废自家（计 job_drops +
+    warning），绝不炸整批处理循环。"""
+    try:
+        _reply_chunk_ts(job, timestamp, error, gateway_queues, log,
+                        bucket_ts=bucket_ts)
+    except Exception as exc:  # noqa: BLE001  畸形载荷只废自家回投
+        _stats["job_drops"] += 1
+        log.warning("%s req=%s idx=%s: %s", warn, job.get("req_id"),
+                    job.get("idx"), str(exc)[:160])
+
+
 def _run_asr_batch(jobs: list, gateway_queues, log, bid: str = "") -> None:
     """一批 asr job：SHM 读取（逐条隔离）→ 批推理 → 逐 job 回投。
 
@@ -634,13 +622,8 @@ def _run_asr_batch(jobs: list, gateway_queues, log, bid: str = "") -> None:
             _stats["job_errors"] += 1
             log.warning("chunk=%s bid=%s 读取失败: %s",
                         _chunk_key(job), bid, err_out[i])
-            try:
-                _reply_chunk_ts(job, [], err_out[i], gateway_queues, log)
-            except Exception as rexc:  # noqa: BLE001  畸形载荷只废自家回投
-                _stats["job_drops"] += 1
-                log.warning("asr error reply failed req=%s idx=%s: %s",
-                            job.get("req_id"), job.get("idx"),
-                            str(rexc)[:160])
+            _reply_chunk_ts_safe(job, [], err_out[i], gateway_queues, log,
+                                 warn="asr error reply failed")
             replied[i] = True
     todo = [i for i in range(n) if audios[i] is not None]
     if not todo:
@@ -663,13 +646,8 @@ def _run_asr_batch(jobs: list, gateway_queues, log, bid: str = "") -> None:
             _stats["job_errors"] += 1
             log.warning("chunk=%s bid=%s 对齐参数非法: %s",
                         _chunk_key(job), bid, str(exc)[:160])
-            try:
-                _reply_chunk_ts(job, [], err_out[i], gateway_queues, log)
-            except Exception as rexc:  # noqa: BLE001  畸形载荷只废自家回投
-                _stats["job_drops"] += 1
-                log.warning("asr bad-metadata reply failed req=%s idx=%s: %s",
-                            job.get("req_id"), job.get("idx"),
-                            str(rexc)[:160])
+            _reply_chunk_ts_safe(job, [], err_out[i], gateway_queues, log,
+                                 warn="asr bad-metadata reply failed")
             replied[i] = True
             continue
         buckets.setdefault((rate, mgs), []).append(i)
@@ -739,28 +717,17 @@ def _run_asr_batch(jobs: list, gateway_queues, log, bid: str = "") -> None:
             _stats["job_errors"] += 1
             log.warning("chunk=%s bid=%s 对齐失败: %s",
                         _chunk_key(job), bid, err_out[i])
-            try:
-                _reply_chunk_ts(job, [], err_out[i],
-                                gateway_queues, log,
-                                bucket_ts=bucket_of.get(i))
-            except Exception as rexc:  # noqa: BLE001  畸形载荷只废自家回投
-                _stats["job_drops"] += 1
-                log.warning("asr error reply failed req=%s idx=%s: %s",
-                            job.get("req_id"), job.get("idx"),
-                            str(rexc)[:160])
+            _reply_chunk_ts_safe(job, [], err_out[i], gateway_queues, log,
+                                 warn="asr error reply failed",
+                                 bucket_ts=bucket_of.get(i))
         else:
             log.info("chunk=%s bid=%s process_ms=%.1f queue_ms=%.0f chars=%d",
                      _chunk_key(job), bid, infer_ms, _queue_ms(job),
                      len(ts_out[i] or []))
-            try:
-                _reply_chunk_ts(job, ts_out[i] or [], None,
-                                gateway_queues, log,
-                                bucket_ts=bucket_of.get(i))
-            except Exception as rexc:  # noqa: BLE001  畸形载荷只废自家回投
-                _stats["job_drops"] += 1
-                log.warning("asr reply failed req=%s idx=%s: %s",
-                            job.get("req_id"), job.get("idx"),
-                            str(rexc)[:160])
+            _reply_chunk_ts_safe(job, ts_out[i] or [], None,
+                                 gateway_queues, log,
+                                 warn="asr reply failed",
+                                 bucket_ts=bucket_of.get(i))
     n_err = sum(1 for i in range(n) if err_out[i] is not None)
     if n_err:
         log.warning("bid=%s 本批对齐失败 %d/%d", bid, n_err, n)

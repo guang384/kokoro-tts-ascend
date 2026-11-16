@@ -31,22 +31,22 @@ import proc_common
 
 log = proc_common.setup_logging("supervisor")   # 尊重 LOG_LEVEL，格式与其余角色统一
 
-GATEWAY_WORKERS_N = proc_common.env_int("GATEWAY_WORKERS", 2, minimum=1)  # 网关进程数
-G2P_WORKERS_N = proc_common.env_int("G2P_WORKERS", 2, minimum=1)  # Stage 1 音素化进程数
-TTS_N = proc_common.env_int("TTS_WORKERS", 4, minimum=1)    # TTS 前向进程数
-ASR_N = proc_common.env_int("ASR_WORKERS", 4, minimum=1)    # ASR 对齐推理进程数（0/负数=配置错误，钳 1 并告警）
-PORT = proc_common.env_int("PORT", 5174, minimum=1)
-HEALTH_DIR = os.getenv("KOKORO_HEALTH_DIR", "/tmp/kokoro-health")
-MAX_PENDING_REQUESTS = proc_common.env_int("MAX_PENDING_REQUESTS", 200, minimum=1)  # 受理级闸门（请求数）
-WORKER_MAILBOX_SIZE = proc_common.env_int("WORKER_MAILBOX_SIZE", 1024, minimum=1)   # 各级队列容量（消息数）
-MAX_INFLIGHT_SENTENCES = proc_common.env_int("MAX_INFLIGHT_SENTENCES", 512, minimum=1)  # 在途级闸门（句子数）
-HEARTBEAT_STALE_S = proc_common.env_float("HEARTBEAT_STALE_S", 30.0, minimum=15.0)  # 心跳停更判定线（心跳 5s 一写；下限 15s=3×周期，防止误杀健康 worker）
-STUCK_KILL_S = proc_common.env_float("STUCK_KILL_S", 300.0, minimum=30.0)  # busy 卡死击杀线（模型推理 hang）
-SPAWN_READY_TIMEOUT_S = proc_common.env_float("SPAWN_READY_TIMEOUT_S", 360.0, minimum=0.0)  # NPU 角色串行启动的就绪等待上限；0=禁用（并行启动，旧行为）
-WEDGE_RESTART_S = proc_common.env_float("WEDGE_RESTART_S", 900.0, minimum=0.0)  # 端到端零成功判死线；0=禁用
+GATEWAY_WORKERS_N = proc_common.env_int("GATEWAY_WORKERS", minimum=1)  # 网关进程数
+G2P_WORKERS_N = proc_common.env_int("G2P_WORKERS", minimum=1)  # Stage 1 音素化进程数
+TTS_N = proc_common.env_int("TTS_WORKERS", minimum=1)    # TTS 前向进程数
+ASR_N = proc_common.env_int("ASR_WORKERS", minimum=1)    # ASR 对齐推理进程数（0/负数=配置错误，钳 1 并告警）
+PORT = proc_common.env_int("PORT", minimum=1)
+HEALTH_DIR = proc_common.HEALTH_DIR   # 单一来源（proc_common 模块常量）
+MAX_PENDING_REQUESTS = proc_common.env_int("MAX_PENDING_REQUESTS", minimum=1)  # 受理级闸门（请求数）
+WORKER_MAILBOX_SIZE = proc_common.env_int("WORKER_MAILBOX_SIZE", minimum=1)   # 各级队列容量（消息数）
+MAX_INFLIGHT_SENTENCES = proc_common.env_int("MAX_INFLIGHT_SENTENCES", minimum=1)  # 在途级闸门（句子数）
+HEARTBEAT_STALE_S = proc_common.env_float("HEARTBEAT_STALE_S", minimum=15.0)  # 心跳停更判定线（心跳 5s 一写；下限 15s=3×周期，防止误杀健康 worker）
+STUCK_KILL_S = proc_common.env_float("STUCK_KILL_S", minimum=30.0)  # busy 卡死击杀线（模型推理 hang）
+SPAWN_READY_TIMEOUT_S = proc_common.env_float("SPAWN_READY_TIMEOUT_S", minimum=0.0)  # NPU 角色串行启动的就绪等待上限；0=禁用（并行启动，旧行为）
+WEDGE_RESTART_S = proc_common.env_float("WEDGE_RESTART_S", minimum=0.0)  # 端到端零成功判死线；0=禁用
 # 毒块防护：同一 chunk 累计重派超过该次数 → 放弃（受影响请求 504），
 # 不再无限循环炸 worker
-REDISPATCH_MAX = proc_common.env_int("REDISPATCH_MAX", 1, minimum=0)
+REDISPATCH_MAX = proc_common.env_int("REDISPATCH_MAX", minimum=0)
 # TTL 兜底线（2×看门狗击杀线）：死亡重派走 requeue_worker 秒级路径，
 # 此值只兜「worker 活着但永远不 ack」与 supervisor 漏检的极端
 SWEEP_TTL_S = 2 * STUCK_KILL_S
@@ -232,23 +232,15 @@ def _wait_started(key) -> None:
         time.sleep(0.5)
 
 
-def _shm_total_bytes() -> int:
-    """/dev/shm 总容量（字节）；读不了返回 -1。"""
-    try:
-        st = os.statvfs("/dev/shm")   # POSIX；Windows 开发机无此 API → 跳过
-        return st.f_frsize * st.f_blocks
-    except (OSError, AttributeError):
-        return -1
-
-
 def check_shm() -> None:
     """启动自检：/dev/shm 过小 → 长文本 /tts 的音频 SHM 块会写满 tmpfs
     触发 SIGBUS（生产事故 20261109：docker 默认 64MB，/tts 长文本必崩
     而 /v1 短文本幸存）。docker run 必须带 --shm-size 2g 起步。"""
-    total = _shm_total_bytes()
-    if total < 0:
+    usage = proc_common.shm_usage()   # statvfs 单一来源（gateway /health 共用）
+    if usage is None:
         log.warning("/dev/shm 容量探测失败（跳过 SHM 自检）")
         return
+    total = usage["total_bytes"]
     gb = total / 2**30
     if total < 1 * 2**30:
         log.error("/dev/shm 只有 %.0fMB —— 长文本 /tts 的音频 SHM 会写满触发"

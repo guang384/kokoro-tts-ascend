@@ -34,8 +34,8 @@ ASR_CONTEXT_MB = 450
 CAPACITY_SAFETY = 1.02   # npu-smi 实际 HBM 还含驱动/未归属开销，容量判断留 2%
 _DEVICE_TOTAL_MB = {}   # dev → 整卡显存 MB（进程内缓存：get_device_properties 不必每批查）
 
-_model_id = os.getenv("KOKORO_MODEL_ID", "hexgrad/Kokoro-82M-v1.1-zh")
-_default_voice = os.getenv("KOKORO_VOICE", "zf_001")
+_model_id = _pc.env_str("KOKORO_MODEL_ID")
+_default_voice = _pc.env_str("KOKORO_VOICE")
 
 _init_lock = threading.Lock()
 _g2p: "G2PEngine | None" = None
@@ -191,19 +191,25 @@ def _parse_smi_proc_mem_short(out: str, pid_candidates) -> float | None:
     return round(total, 1) if matched else None
 
 
-def _run_smi(cmd: list) -> str:
-    """执行 npu-smi；缺失/超时/nonzero/非 POSIX 一律返回空串（观测降级）。"""
+def _run_cmd(cmd: list, timeout_s: float, warn: str = "") -> str:
+    """子进程探测公共路径（npu-smi 观测 / 卡容量查询 / torch 导入探测共用）：
+    缺失/超时/nonzero/非 POSIX 一律返回空串（观测降级）。
+
+    warn 非空时失败打 WARNING（自检类调用必须留痕，不能假装通过）；
+    观测类高频调用只 debug。"""
     try:
         import subprocess
 
         r = subprocess.run(cmd, capture_output=True, text=True,
-                           timeout=_SMI_PROC_TIMEOUT_S)
+                           timeout=timeout_s)
     except Exception as exc:  # noqa: BLE001  无二进制/超时/权限
-        log.debug("npu-smi call failed cmd=%s: %s", cmd, str(exc)[:120])
+        (log.warning if warn else log.debug)(
+            "%s failed cmd=%s: %s", warn or "subprocess", cmd, str(exc)[:120])
         return ""
     if r.returncode != 0:
-        log.debug("npu-smi rc=%s cmd=%s stderr=%s", r.returncode, cmd,
-                  (r.stderr or "")[:120])
+        (log.warning if warn else log.debug)(
+            "%s rc=%s cmd=%s stderr=%s", warn or "subprocess",
+            r.returncode, cmd, (r.stderr or "")[:120])
         return ""
     return r.stdout or ""
 
@@ -228,10 +234,12 @@ def smi_process_mb(device: str = "npu:0") -> float | None:
             return c["mb"]
 
     pids = _pid_candidates()
-    mb = _parse_smi_process_mem(_run_smi(["npu-smi", "info"]), pids)
+    mb = _parse_smi_process_mem(
+        _run_cmd(["npu-smi", "info"], _SMI_PROC_TIMEOUT_S), pids)
     if mb is None:
         mb = _parse_smi_proc_mem_short(
-            _run_smi(["npu-smi", "info", "-t", "proc-mem", "-i", str(idx)]),
+            _run_cmd(["npu-smi", "info", "-t", "proc-mem", "-i", str(idx)],
+                     _SMI_PROC_TIMEOUT_S),
             pids)
     c.update(ts=now, pid=pid, dev=dev, mb=mb)
     return mb
@@ -249,7 +257,7 @@ def _probe_npu(torch, idx: int) -> bool:
         return False
 
 
-_SAMPLE_RATE = _pc.env_int("KOKORO_SAMPLE_RATE", 24000, minimum=8000)  # 声明模型真实采样率（非可调旋钮：改它会连锁破坏 fade 窗口/预算换算/WAV 头）
+_SAMPLE_RATE = _pc.env_int("KOKORO_SAMPLE_RATE", minimum=8000)  # 声明模型真实采样率（非可调旋钮：改它会连锁破坏 fade 窗口/预算换算/WAV 头）
 if _SAMPLE_RATE != 24000:
     # batched_model/memcalc/ASR 时间戳都按 24k 编译；允许改 env 只会产出
     # 错误 WAV 头/时长/时间戳偏移。启动即拒绝，别把配置错误拖到首个请求。
@@ -337,6 +345,28 @@ def asr_budget_meta():
     return _last_asr_budget
 
 
+def _apply_npu_budget(device: str, budget_mb: int, frac_numerator: float) -> tuple:
+    """预算落地公共路径（tts/asr 共用）：set_per_process_memory_fraction
+    硬限 + 启动预占（砍 2% 给分配器对齐/元数据开销——临时表达式创建后
+    立即无引用释放，整块进入缓存池供后续切分；npu-smi 从此恒定显示本预算）。
+    返回 (frac, idx)；失败向上抛（调用方记入各自 budget_error）。
+
+    fraction 必须高于预占值：预占恰好等于 allowed 时，torch 内部用浮点
+    重算 allowed 会舍入出"少一丁点"，严格比较即假 OOM（生产事故：卡空
+    60GB 却报 5.11GB 分配失败）。硬上限仍生效——超出 frac_numerator 才
+    真正拒绝，保护共享卡不被本进程挤占。"""
+    import torch
+
+    idx = int(str(device).split(":")[-1]) if ":" in str(device) else 0
+    total = torch.npu.get_device_properties(idx).total_memory
+    frac = min(frac_numerator / total, 1.0)
+    torch.npu.set_per_process_memory_fraction(frac, idx)
+    budget = budget_mb * 2**20
+    torch.empty(int(budget * 0.98), dtype=torch.uint8,
+                device=torch.device(f"npu:{idx}"))
+    return frac, idx
+
+
 def _prime_memory(device: str) -> None:
     """tts worker：按公式自动推导显存预算：fraction 硬限 + 启动预占。
 
@@ -348,29 +378,13 @@ def _prime_memory(device: str) -> None:
         return
     global _last_budget, _budget_error
     try:
-        import torch
-
-        idx = int(str(device).split(":")[-1]) if ":" in str(device) else 0
-        total = torch.npu.get_device_properties(idx).total_memory
         # 与消费者（tts 认领队列/看门狗）同 minima：原裸 int() 在
         # TTS_MAX_BATCH_SIZE=0 时会算出 ~913MB 预算（实际批为 1）→ 首批真 OOM
-        import proc_common as _pc
-
-        max_batch = _pc.env_int("TTS_MAX_BATCH_SIZE", 8, minimum=1)
-        chunk_chars = _pc.env_int("TTS_CHUNK_CHARS", 120, minimum=8)
-        speed_floor = _pc.env_float("TTS_SPEED_FLOOR", 0.5, minimum=0.1)
+        max_batch = _pc.env_int("TTS_MAX_BATCH_SIZE", minimum=1)
+        chunk_chars = _pc.env_int("TTS_CHUNK_CHARS", minimum=8)
+        speed_floor = _pc.env_float("TTS_SPEED_FLOOR", minimum=0.1)
         budget_mb, L, sec = _auto_budget_mb(max_batch, chunk_chars, speed_floor)
-        budget = budget_mb * 2**20
-        # fraction 必须高于预占值：预占恰好等于 allowed 时，torch 内部用浮点
-        # 重算 allowed 会舍入出"少一丁点"，严格比较即假 OOM（生产事故：
-        # 卡空 60GB 却报 5.11GB 分配失败）。硬上限本身仍生效——超出预算+5%
-        # 才会真正拒绝，保护共享卡不被本进程挤占。
-        frac = min(budget * 1.05 / total, 1.0)
-        torch.npu.set_per_process_memory_fraction(frac, idx)
-        # 预占（砍 2% 给分配器对齐/元数据开销）：临时表达式创建后立即无引用
-        # 释放，整块进入缓存池供后续切分；npu-smi 从此恒定显示本预算
-        torch.empty(int(budget * 0.98), dtype=torch.uint8,
-                    device=torch.device(f"npu:{idx}"))
+        frac, _idx = _apply_npu_budget(device, budget_mb, budget_mb * 2**20 * 1.05)
         _last_budget = (budget_mb, L, sec)
         _budget_error = None  # 重试成功必须复位：否则心跳永远假报预算失败
         log.info("NPU budget %.1fGB (auto: B=%d x %d chars/sent, speed>=%.1f,"
@@ -400,21 +414,12 @@ def prime_asr_memory(device: str) -> None:
         return
     global _asr_budget_error, _last_asr_budget
     try:
-        import torch
-
-        idx = int(str(device).split(":")[-1]) if ":" in str(device) else 0
-        total = torch.npu.get_device_properties(idx).total_memory
         # 与 asr_main 认领量同源同 minima：ASR_MAX_BATCH_SIZE=0 时裸 int()
         # 会算出 ~1.16GB 预算（实际批为 1）→ 热身/首批假象
-        max_batch = _pc.env_int("ASR_MAX_BATCH_SIZE", 8, minimum=1)
+        max_batch = _pc.env_int("ASR_MAX_BATCH_SIZE", minimum=1)
         budget_mb, t_max, sec = _asr_auto_budget_mb(max_batch)
-        budget = budget_mb * 2**20
-        frac = min((budget * 0.98 + 256 * 2**20) / total, 1.0)
-        torch.npu.set_per_process_memory_fraction(frac, idx)
-        # 预占（砍 2% 给分配器对齐/元数据开销）：临时表达式创建后立即无
-        # 引用释放，整块进入缓存池供后续切分；npu-smi 从此恒定显示本预算
-        torch.empty(int(budget * 0.98), dtype=torch.uint8,
-                    device=torch.device(f"npu:{idx}"))
+        frac, idx = _apply_npu_budget(
+            device, budget_mb, budget_mb * 2**20 * 0.98 + 256 * 2**20)
         _last_asr_budget = (budget_mb, t_max, sec)
         _asr_budget_error = None  # 重试成功必须复位：否则心跳永远假报预算失败
         log.info("ASR NPU budget %.2fGB (auto: B=%d, group<=%.0fs → %d enc"
@@ -432,27 +437,20 @@ def _npu_total_mb() -> float | None:
     PID 1，父进程一旦创建 CANN 上下文就会占用一份设备显存，挤占 worker
     预算；原实现只 `import torch` 不 import torch_npu，`torch.npu` 不存在，
     except 静默返回 None——自检形同虚设。子进程查询完即退出，父进程零
-    上下文。失败必须留痕（warning），不能继续假装自检通过了。"""
-    import subprocess
+    上下文。失败必须留痕（warning，_run_cmd warn= 参数），不能继续假装
+    自检通过了。"""
     import sys
 
     code = ("import torch, torch_npu\n"
             "print(torch.npu.get_device_properties(0).total_memory / 2**20)")
-    try:
-        r = subprocess.run([sys.executable, "-c", code],
-                           capture_output=True, text=True, timeout=20)
-    except Exception as exc:  # noqa: BLE001  超时/无解释器：自检降级
-        log.warning("NPU capacity probe failed to start (ignored): %s", exc)
-        return None
-    if r.returncode != 0:
-        log.warning("NPU capacity probe failed (rc=%s, ignored): %s",
-                    r.returncode, (r.stderr or "").strip()[:200])
+    out = _run_cmd([sys.executable, "-c", code], 20, warn="NPU capacity probe")
+    if not out:
         return None
     try:
-        return float(r.stdout.strip().splitlines()[-1])
+        return float(out.strip().splitlines()[-1])
     except (ValueError, IndexError):
         log.warning("NPU capacity probe unparsable output (ignored): %r",
-                    (r.stdout or "")[:200])
+                    (out or "")[:200])
         return None
 
 
@@ -503,36 +501,27 @@ def npu_mem_estimate(device: str, budget_mb: float | None = None,
                      context_mb: float = 0.0) -> dict | None:
     """读取 torch 设备计数器 → estimate_worker_mem。
 
-    仅 npu/cuda；cpu/API 失败返回 None。**必须在 worker 主线程调用**：
-    心跳线程碰坏态 NPU 会 SIGBUS（生产事故 20261109）。"""
+    仅 npu/cuda（同一套 torch 计数器 API，仅子模块名不同）；cpu/API 失败
+    返回 None。**必须在 worker 主线程调用**：心跳线程碰坏态 NPU 会 SIGBUS
+    （生产事故 20261109）。"""
     dev = str(device or "")
+    api = "npu" if dev.startswith("npu") else (
+        "cuda" if dev.startswith("cuda") else None)
+    if api is None:
+        return None
     try:
-        if dev.startswith("npu"):
-            import torch
+        import torch
 
-            idx = int(dev.split(":")[-1]) if ":" in dev else 0
-            total_mb = _DEVICE_TOTAL_MB.get(dev)
-            if total_mb is None:
-                total_mb = (torch.npu.get_device_properties(idx).total_memory
-                            / 2**20)
-                _DEVICE_TOTAL_MB[dev] = total_mb
-            allocated_mb = torch.npu.memory_allocated(idx) / 2**20
-            reserved_mb = torch.npu.memory_reserved(idx) / 2**20
-        elif dev.startswith("cuda"):
-            import torch
-
-            idx = int(dev.split(":")[-1]) if ":" in dev else 0
-            total_mb = _DEVICE_TOTAL_MB.get(dev)
-            if total_mb is None:
-                total_mb = (torch.cuda.get_device_properties(idx).total_memory
-                            / 2**20)
-                _DEVICE_TOTAL_MB[dev] = total_mb
-            allocated_mb = torch.cuda.memory_allocated(idx) / 2**20
-            reserved_mb = torch.cuda.memory_reserved(idx) / 2**20
-        else:
-            return None
+        dx = getattr(torch, api)   # torch.npu / torch.cuda
+        idx = int(dev.split(":")[-1]) if ":" in dev else 0
+        total_mb = _DEVICE_TOTAL_MB.get(dev)
+        if total_mb is None:
+            total_mb = dx.get_device_properties(idx).total_memory / 2**20
+            _DEVICE_TOTAL_MB[dev] = total_mb
+        allocated_mb = dx.memory_allocated(idx) / 2**20
+        reserved_mb = dx.memory_reserved(idx) / 2**20
         process_mb = None
-        if dev.startswith("npu"):
+        if api == "npu":
             try:
                 process_mb = smi_process_mb(dev)
             except Exception:  # noqa: BLE001  观测失败不影响 torch 指标
@@ -559,11 +548,11 @@ def capacity_check(tts_n: int, asr_n: int):
         import proc_common as _pc
 
         tts_budget = _auto_budget_mb(
-            _pc.env_int("TTS_MAX_BATCH_SIZE", 8, minimum=1),
-            _pc.env_int("TTS_CHUNK_CHARS", 120, minimum=8),
-            _pc.env_float("TTS_SPEED_FLOOR", 0.5, minimum=0.1))[0]
+            _pc.env_int("TTS_MAX_BATCH_SIZE", minimum=1),
+            _pc.env_int("TTS_CHUNK_CHARS", minimum=8),
+            _pc.env_float("TTS_SPEED_FLOOR", minimum=0.1))[0]
         asr_budget = _asr_auto_budget_mb(
-            _pc.env_int("ASR_MAX_BATCH_SIZE", 8, minimum=1))[0]
+            _pc.env_int("ASR_MAX_BATCH_SIZE", minimum=1))[0]
         # 进程上限 = fraction 的 1.05×预算 + CANN 上下文；再留 2% 给
         # npu-smi 里未归属到进程的驱动/系统开销。0.98 只是预占池，
         # 用它做容量判断会低估（真机 5 tts+4 asr 实测 62.4GB，旧式 56.7GB）。
@@ -690,7 +679,10 @@ def _resolve_disable_complex(device: str) -> bool:
 def _torch_import_ok() -> bool:
     """子进程探测 `import torch` 是否安全。spacy→thinc 会无条件 import
     torch（thinc/compat.py 的 try 拦不住段错误）——QEMU/坏 torch 环境
-    进程内 import 直接 SIGSEGV，只能子进程探测。只在首个英文词时跑一次。"""
+    进程内 import 直接 SIGSEGV，只能子进程探测。只在首个英文词时跑一次。
+
+    注意不走 _run_cmd：它以 stdout 判真假，而本探测关心的是 **returncode**
+    （成功的 import 恰恰不产生任何 stdout）。"""
     import subprocess
     import sys
 
