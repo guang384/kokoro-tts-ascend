@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""supervisor：Actor 风格流水线的监督者（进程编排父进程）。
+"""supervisor：无状态竞争消费者流水线的监督者（进程编排父进程）。
 
 进程拓扑：
     gateway×E  HTTP 网关：接入/校验/聚合（synth_part 按 req_id 收齐）/编码
@@ -38,7 +38,7 @@ ASR_N = proc_common.env_int("ASR_WORKERS", 4, minimum=1)    # ASR 对齐推理�
 PORT = proc_common.env_int("PORT", 5174, minimum=1)
 HEALTH_DIR = os.getenv("KOKORO_HEALTH_DIR", "/tmp/kokoro-health")
 MAX_PENDING_REQUESTS = proc_common.env_int("MAX_PENDING_REQUESTS", 200, minimum=1)  # 受理级闸门（请求数）
-WORKER_MAILBOX_SIZE = proc_common.env_int("WORKER_MAILBOX_SIZE", 1024, minimum=1)   # Mailbox 级容量（消息数）
+WORKER_MAILBOX_SIZE = proc_common.env_int("WORKER_MAILBOX_SIZE", 1024, minimum=1)   # 各级队列容量（消息数）
 MAX_INFLIGHT_SENTENCES = proc_common.env_int("MAX_INFLIGHT_SENTENCES", 512, minimum=1)  # 在途级闸门（句子数）
 HEARTBEAT_STALE_S = proc_common.env_float("HEARTBEAT_STALE_S", 30.0, minimum=15.0)  # 心跳停更判定线（心跳 5s 一写；下限 15s=3×周期，防止误杀健康 worker）
 STUCK_KILL_S = proc_common.env_float("STUCK_KILL_S", 300.0, minimum=30.0)  # busy 卡死击杀线（模型推理 hang）
@@ -604,13 +604,13 @@ def _monitor_step() -> None:
 
 
 def create_mailboxes() -> None:
-    """Mailbox 创建（全部有界，Actor 背压）：下游满 → 上游停 → 更上游拒。
+    """队列创建（全部有界，逐级背压）：下游满 → 上游停 → 更上游拒。
     /health 的 queues 段展示各阶段入队/出队/最长排队。
 
     独立成函数：布线一致性可被测试覆盖。历史事故（随 aligner 删除已消解）：
     asr 曾按自己的序号取 per-aligner 结果队列，池尺寸不等时 KeyError 崩掉
     编排。"""
-    # 每个邮箱分配固定序号（Redis 键 kokoro:q:{idx}:{name} 由序号决定，
+    # 每个队列分配固定序号（Redis 键 kokoro:q:{idx}:{name} 由序号决定，
     # supervisor 与子进程必须一致）
     idx = 0
 

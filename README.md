@@ -25,7 +25,7 @@ flowchart LR
       q1[("g2p 队列")]
       q2[("tts 认领队列")]
       q3[("asr 队列<br/>仅 /tts 分支")]
-      q4[("gateway 结果邮箱")]
+      q4[("gateway 结果队列")]
     end
     shm[("/dev/shm<br/>PCM16 音频块<br/>gateway 终态回收")]
   end
@@ -55,8 +55,9 @@ chunk）；**分叉点两处**——① tts 前向后仅对 /tts 的 chunk 派 a
 TS 账本收齐，孤儿由清道夫兜底）——消息只走描述符、音频零拷贝走 SHM、网关终态
 回收，即 /dev/shm 缓存的轮换机制。
 
-Actor 流水线：进程即 Actor、队列即 Mailbox、全部有界——下游满 → 上游阻塞 → 更上游拒单（429）。
-Mailbox 走 Redis 队列（supervisor 子进程托管的 redis-server，unix socket、纯内存）：
+并发模型：同类 worker 无状态，从共享队列取活；tts/asr 原子凑批（同长度档
+≤8 句一次前向）+ 认领登记（挂掉精确重派）。队列全部有界，逐级背压，最终
+拒单 429。队列走 Redis（supervisor 托管，unix socket、纯内存）。
 **pull 模式**——worker 空闲即取（LPOP 轮询，无预分配无队头阻塞）；消息常驻服务端，
 队列内消息零丢失（已认领未 ack 的由 supervisor 按 worker 死亡精确重派，秒级；
 TTL 只兜漏检极端）。depth = LLEN/ZCARD = 真实等待数。gateway 进程间以 SO_REUSEPORT
@@ -179,7 +180,7 @@ docker run -d --name kokoro-tts \
 > → 等 `/metrics` 的 `tts` depth=0（旧 worker 吃完队列）→ 停旧 tts/asr →
 > 起新版本。排空后队列为空，不存在混合格式 member，最稳妥。
 
-> **外部共享 Redis 限制**：队列键与 gateway 结果邮箱按本实例 origin 编号，
+> **外部共享 Redis 限制**：队列键与 gateway 结果队列按本实例 origin 编号，
 > supervisor 的 sweep 只认本进程拉起的 worker pid——**一个 Redis 只允许
 > 一个 supervisor/副本**。多副本共享同一 Redis 需要实例 ID 命名空间 +
 > 存活 worker 注册表，当前未实现；多副本请每副本各自内嵌 Redis。
@@ -247,7 +248,7 @@ python scripts/parity_smoke.py                          # 故障注入冒烟（�
 | `GATEWAY_WORKERS` / `G2P_WORKERS` | 2/2 | 各池进程数；全部**最少 1**（0/负数钳 1 并告警） |
 | `MAX_INFLIGHT_SENTENCES` | 512 | 认领队列容量（在途句数闸门）：满则 g2p 阻塞 → 上游 429；worker 死亡其在途立即精确重派（≤REDISPATCH_MAX 次，超限放弃 504 兜底） |
 | `MAX_PENDING_REQUESTS` | 200 | 受理级闸门，满则立即 429（Redis 容量门为 LLEN 判满，并发生产者下超卖 ≤ 生产者数、随消费自愈，方向安全） |
-| `WORKER_MAILBOX_SIZE` | 1024 | 各级邮箱容量（含 ack；满则背压逐级传导） |
+| `WORKER_MAILBOX_SIZE` | 1024 | 各级队列容量（含 ack；满则背压逐级传导） |
 | `WAIT_TIMEOUT_S` | 120 | **单请求总预算**（秒）：音频+对齐共享同一截止线（不再是两段各 120s 串联），超时 504 并下发 CANCEL（在途 chunk 前向前被丢弃） |
 | `FAST_REJECT_MARGIN` | 1.15 | 准入快速拒绝冗余系数：路径各段 EMA 排队等待求和 > WAIT_TIMEOUT_S×系数 才秒拒 429（EMA 是估计值，边界放行） |
 | `TTS_MAX_INPUT_CHARS` / `TTS_CHUNK_CHARS` | 2000/120 | 输入上限（不影响显存峰值，影响队列压力）/ 切句长度（不建议调小；实际单 chunk 上限还会被 `_chunk_cap` 的 `int(128×speed)` 钳住，调高到 128 以上在 speed=1 时不再生效——这是 ASR 组 ≤30s 的保证） |
