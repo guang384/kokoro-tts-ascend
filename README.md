@@ -12,18 +12,19 @@ Kokoro TTS（`hexgrad/Kokoro-82M-v1.1-zh`，103 中文音色 + 中英混合）�
 
 ```mermaid
 flowchart LR
-  client([客户端]) --> nginx["nginx · least_conn<br/>（多副本可选，单副本可直连）"]
-  nginx --> gw
+  client([客户端]) -->|"POST /v1/audio/speech · 纯 TTS"| nginx
+  client -->|"POST /tts · 音频 + 字级时间戳"| nginx
+  nginx["nginx · least_conn<br/>（多副本可选，单副本可直连）"] --> gw
 
   subgraph box["容器 · supervisor 父进程编排（重生 / 看门狗 / 排空）"]
     gw["gateway ×E<br/>校验 · 受理闸门 · 聚合 · 编码"]
     g2p["g2p ×G<br/>切句 / G2P"]
     tts["tts ×T<br/>批量前向 · 跨请求混批"]
-    asr["asr ×S<br/>FunASR 字级对齐"]
+    asr["asr ×S<br/>FunASR 字级对齐<br/>仅 /tts 分支"]
     subgraph q["内嵌 redis-server（unix socket · 纯内存）"]
       q1[("g2p 队列")]
       q2[("tts 认领队列")]
-      q3[("asr 队列")]
+      q3[("asr 队列<br/>仅 /tts 分支")]
       q4[("gateway 结果邮箱")]
     end
     shm[("/dev/shm<br/>PCM16 音频块")]
@@ -34,14 +35,21 @@ flowchart LR
   g2p -->|chunk 音素| q2
   q2 -->|认领组批 ≤B| tts
   tts -->|写块| shm
-  tts -->|synth_part| q4
-  tts -->|asr job（chunk 级）| q3
-  q3 -->|pull 拉取| asr
-  asr -->|读音频块| shm
-  asr -->|chunk_ts| q4
+  tts -->|synth_part · 音频账本| q4
+  tts -.->|"asr job（chunk 级）"| q3
+  q3 -.->|pull 拉取| asr
+  asr -.->|读音频块| shm
+  asr -.->|chunk_ts · TS 账本| q4
   q4 -->|收齐 need 块| gw
-  gw -->|HTTP 响应| client
+  gw -->|"/v1 直接编码返回<br/>/tts 双账本收齐后返回"| client
+
+  classDef ttsonly fill:#fdebd0,stroke:#d35400;
+  class asr,q3 ttsonly
 ```
+
+两条请求**共享主干** gateway → g2p → tts（跨请求混批，同批可混 /v1 与 /tts 的
+chunk）；**分叉点两处**——① tts 前向后仅对 /tts 的 chunk 派 asr job（图中橙色
+虚线分支）；② 聚合后 /v1 直接编码返回，/tts 还要等 TS 账本收齐（时序图见下）。
 
 Actor 流水线：进程即 Actor、队列即 Mailbox、全部有界——下游满 → 上游阻塞 → 更上游拒单（429）。
 Mailbox 走 Redis 队列（supervisor 子进程托管的 redis-server，unix socket、纯内存）：
