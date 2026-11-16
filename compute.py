@@ -12,7 +12,7 @@ asr 池（asr_main）：FunASR 词级时间戳推理（chunk 级 job → chunk_t
 
 前向 = batched_model.forward_batch（B≤MAX_BATCH、同 (音素长度类, dtype)
 桶内的句），质量与历史版本完全一致（未采用 concat 多句单序列——时长预测
-OOD，A/B 结论见 ab_quality.py）。
+OOD，A/B 实验结论见 git 历史 scripts/ab_quality.py）。
 """
 import logging
 import os
@@ -346,29 +346,17 @@ def ship_batch(compute, batch: dict, gateway_queues, asr_queue, log,
             protocol.put_result(gateway_queues[rid_origin], protocol.synth_error(
                 rid, f"音频回传失败: {str(exc)[:120]}", protocol.KIND_COMPUTE), log)
             continue
-        # 阶段耗时随行（升级期兼容字段）：v12 的 done 行不再展示这些跨度
-        # （批/句级明细由 worker 的 bid=/chunk= 行承担），字段保留供旧网关
-        # 滚动升级兜底。g2p 整单一次算 → 各 chunk 同值取 max；q_tts 为本批
-        # 内该请求各 chunk 认领等待之和；tts 前向为批时按 chunk 数分摊。
-        # 旧消息缺字段由消费端按 0 兜底。
+        # 阶段耗时随行：q_g2p/g2p 整单一次算 → 各 chunk 同值取 max；
+        # tts_done 为本批前向结束的绝对时刻（网关对同请求取 max，与 seg
+        # 的 q_claim min 相减得请求级 tts 墙钟跨度）。请求级排队跨度由
+        # seg 级 q_enq/q_claim（入队/认领时刻）在网关计算，不随消息重复携带。
         timings = {
             "q_g2p": max((c.get("q_g2p_ms") or 0.0 for _i, _p, c in items),
                          default=0.0),
             "g2p": max((c.get("g2p_ms") or 0.0 for _i, _p, c in items),
                        default=0.0),
-            # 旧口径保留给未升级网关/旧消息兜底；新 q_tts 由 seg 的
-            # q_enq/q_claim 在网关按"首个入队→最后出队"墙钟跨度计算。
-            "q_tts": sum(c.get("_qw_ms") or 0.0 for _i, _p, c in items),
-            "tts": infer_ms * len(items) / len(chunks),
             "tts_done": tts_done_ts,
         }
-        enq = [c["_q_enq"] for _i, _p, c in items
-               if isinstance(c.get("_q_enq"), (int, float))]
-        claim = [c["_q_claim"] for _i, _p, c in items
-                 if isinstance(c.get("_q_claim"), (int, float))]
-        if enq and claim:
-            timings["q_tts_first"] = min(enq)
-            timings["q_tts_last"] = max(claim)
         delivered = protocol.put_result(
             gateway_queues[items[0][2].get("origin", 0)],
             protocol.synth_part(rid, need,
@@ -593,19 +581,16 @@ def _looks_like_oom(msg: str) -> bool:
     return bool(_OOM_RE.search(str(msg)))
 
 
-def _reply_chunk_ts(job: dict, timestamp: list, error, asr_ms: float,
+def _reply_chunk_ts(job: dict, timestamp: list, error,
                     gateway_queues, log, bucket_ts=None) -> None:
     """chunk_ts 回投 origin 网关（成功/失败统一路径）。回投满计
     job_drops——网关 fut_ts 超时 504 兜底（at-most-once 设计内）。
 
-    timings.asr_done = 请求级 asr 墙钟跨度终点（网关对同请求取 max，
-    起点=min 的 q_asr_last 即认领时刻）；asr_bucket = 桶起始时刻，仅
-    进过推理桶的 job 携带——网关按同请求去重计数 asr_fw（桶数）。"""
-    timings = {"q_asr": job.get("_qw_ms") or 0.0,
-               "asr": asr_ms,
-               # 请求级 q_asr 跨度：网关对同请求取
-               # min(首 job 入队)/max(末 job 出队)
-               "q_asr_first": job.get("_q_enq"),
+    请求级墙钟跨度全在网关按戳计算：q_asr = min(首 job 入队 _q_enq)→
+    max(末 job 出队 _q_claim)；asr = min(认领)→max(末桶完成 asr_done)；
+    asr_bucket = 桶起始时刻，仅进过推理桶的 job 携带——网关按同请求
+    去重计数 asr_fw（桶数）。"""
+    timings = {"q_asr_first": job.get("_q_enq"),
                "q_asr_last": job.get("_q_claim"),
                "asr_done": time.time()}
     if bucket_ts is not None:
@@ -628,9 +613,9 @@ def _run_asr_batch(jobs: list, gateway_queues, log, bid: str = "") -> None:
     请求 502）。本函数正常路径不抛；畸形载荷的字段引用错误（如缺
     req_id）例外——落到 asr_main 外层 except 兜底。
 
-    timings.asr = 该 job 按音频时长分摊的桶墙钟（同请求各 chunk 求和 ≈
-    该请求实际占用的对齐算力；不再每 job 复制整批时间、也不跨桶叠加）；
-    _stats.asr_ms 仍累计推理墙钟总和（按桶累加一次，不随 B 膨胀）。"""
+    timings 只携带跨度戳（_q_enq/_q_claim/asr_done/asr_bucket）——请求级
+    耗时跨度全在网关按戳计算；_stats.asr_ms 累计推理墙钟总和（按桶累加
+    一次，不随 B 膨胀）。"""
     import funasr_ts
 
     n = len(jobs)
@@ -638,7 +623,6 @@ def _run_asr_batch(jobs: list, gateway_queues, log, bid: str = "") -> None:
     replied = [False] * n
     ts_out = [None] * n
     err_out = [None] * n
-    asr_ms_out = [0.0] * n   # 逐 job 摊销后的对齐计算耗时（毫秒）
     bucket_of = {}           # job idx → 桶起始时刻（网关去重计 asr_fw）
     # ① 逐 job 读 SHM：单 job 失败立即 error 回投并剔除，不连坐
     for i, job in enumerate(jobs):
@@ -651,7 +635,7 @@ def _run_asr_batch(jobs: list, gateway_queues, log, bid: str = "") -> None:
             log.warning("chunk=%s bid=%s 读取失败: %s",
                         _chunk_key(job), bid, err_out[i])
             try:
-                _reply_chunk_ts(job, [], err_out[i], 0.0, gateway_queues, log)
+                _reply_chunk_ts(job, [], err_out[i], gateway_queues, log)
             except Exception as rexc:  # noqa: BLE001  畸形载荷只废自家回投
                 _stats["job_drops"] += 1
                 log.warning("asr error reply failed req=%s idx=%s: %s",
@@ -680,7 +664,7 @@ def _run_asr_batch(jobs: list, gateway_queues, log, bid: str = "") -> None:
             log.warning("chunk=%s bid=%s 对齐参数非法: %s",
                         _chunk_key(job), bid, str(exc)[:160])
             try:
-                _reply_chunk_ts(job, [], err_out[i], 0.0, gateway_queues, log)
+                _reply_chunk_ts(job, [], err_out[i], gateway_queues, log)
             except Exception as rexc:  # noqa: BLE001  畸形载荷只废自家回投
                 _stats["job_drops"] += 1
                 log.warning("asr bad-metadata reply failed req=%s idx=%s: %s",
@@ -741,11 +725,6 @@ def _run_asr_batch(jobs: list, gateway_queues, log, bid: str = "") -> None:
                 for i in idxs:
                     err_out[i] = msg[:200]
         bucket_ms = (time.perf_counter() - t1) * 1000
-        # 按音频时长摊销：同请求各 chunk 求和 = 该请求在该桶占用的算力份额
-        # （batch 内共享同一面墙钟，不能每个 job 都记全量）。
-        total_samples = sum(len(audios[i]) for i in idxs) or 1
-        for i in idxs:
-            asr_ms_out[i] = bucket_ms * len(audios[i]) / total_samples
         infer_ms += bucket_ms
     _stats["asr_ms"] = _stats.get("asr_ms", 0.0) + infer_ms
     # 批头行（bid 关联）：本批公共信息一行，job 行随后逐条
@@ -761,7 +740,7 @@ def _run_asr_batch(jobs: list, gateway_queues, log, bid: str = "") -> None:
             log.warning("chunk=%s bid=%s 对齐失败: %s",
                         _chunk_key(job), bid, err_out[i])
             try:
-                _reply_chunk_ts(job, [], err_out[i], asr_ms_out[i],
+                _reply_chunk_ts(job, [], err_out[i],
                                 gateway_queues, log,
                                 bucket_ts=bucket_of.get(i))
             except Exception as rexc:  # noqa: BLE001  畸形载荷只废自家回投
@@ -774,7 +753,7 @@ def _run_asr_batch(jobs: list, gateway_queues, log, bid: str = "") -> None:
                      _chunk_key(job), bid, infer_ms, _queue_ms(job),
                      len(ts_out[i] or []))
             try:
-                _reply_chunk_ts(job, ts_out[i] or [], None, asr_ms_out[i],
+                _reply_chunk_ts(job, ts_out[i] or [], None,
                                 gateway_queues, log,
                                 bucket_ts=bucket_of.get(i))
             except Exception as rexc:  # noqa: BLE001  畸形载荷只废自家回投

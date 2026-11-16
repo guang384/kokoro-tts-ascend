@@ -209,7 +209,6 @@ TTS_BATCH_BUCKET_CHARS = env_int("TTS_BATCH_BUCKET_CHARS", 64, minimum=8)  # 认
 # 非可调配参数：改它会同时改变切句粒度、切组粒度与预算峰值，需同步评审。
 ASR_MAX_GROUP_SEC = 30.0
 _CLAIM_HEADER = 23      # member 头部：2B 长度 + 1B 精度 + 20B FIFO 序号
-_LEGACY_HEADER = 22     # 旧格式头部（无精度字节）：仅用于升级期单向解码
 _CLAIM_SCAN_WINDOW = 64 # 认领扫描窗口（最老 64 条）
 _CLAIM_POLL_S = 0.01    # 容量门等待与空认领轮询间隔
 _REDIS_POLL_S = 0.01   # 出队轮询间隔（无 BLPOP：消息交接延迟 ≤10ms，量级无感）
@@ -219,30 +218,18 @@ _SHARED_REDIS = None   # 进程级共享客户端（cancel SET 等无队列归�
 
 
 def decode_member(m):
-    """解出 (chunk, seq)；新 23B 头优先，失败回退旧 22B 头。
+    """解出 (chunk, seq)：23B 头（2B 长度 + 1B 精度 + 20B FIFO 序号）+ pickle 载荷。
 
-    单向升级兼容：共享 Redis 里旧版本留下的 member（无精度字节）仍可被
-    新代码消费（dtype 显式补成默认 fp32），避免升级期受影响请求干等
-    WAIT_TIMEOUT 才 504；反向（旧代码读新 member）无法兼容，README 已
-    注明共享 Redis 升级前先排空。两种头在偏移 22 处的字节不同（新格式是
-    序号末位数字，旧格式是 pickle 起始 0x80），互误判概率可忽略，且
-    seq 必须是 20 位数字才接受。
-    """
-    for off in (_CLAIM_HEADER, _LEGACY_HEADER):
-        try:
-            chunk = pickle.loads(m[off:])
-        except Exception:  # noqa: BLE001
-            continue
-        if not isinstance(chunk, dict) or "req_id" not in chunk:
-            continue
-        try:
-            seq = int(m[off - 20:off].decode())
-        except (TypeError, ValueError):
-            continue
-        if "dtype" not in chunk:   # 旧格式无精度字节 → 契约显式化为默认
-            chunk["dtype"] = "fp32"
-        return chunk, seq
-    return None, None
+    解析失败/形状不对返回 (None, None)：损坏 member 由调用方走毒块路径
+    丢弃计数。容器内所有进程同镜像同版本，队列无跨版本格式问题。"""
+    try:
+        chunk = pickle.loads(m[_CLAIM_HEADER:])
+        seq = int(m[_CLAIM_HEADER - 20:_CLAIM_HEADER].decode())
+    except Exception:  # noqa: BLE001  截断/损坏 member
+        return None, None
+    if not isinstance(chunk, dict) or "req_id" not in chunk:
+        return None, None
+    return chunk, seq
 
 
 def _make_redis_client():
@@ -276,10 +263,6 @@ def cancel_add(req_id: str) -> None:
     的 chunk 照常入队，由认领侧统一过滤）。标记寿命 600s（≥ 队列排空
     余量），由 TtsClaimQueue.sweep 周期清扫（有界不泄漏）。"""
     shared_redis().zadd("kokoro:cancel", {req_id: time.time()})
-
-
-def is_cancelled(req_id: str) -> bool:
-    return shared_redis().zscore("kokoro:cancel", req_id) is not None
 
 
 # 各段队列的固定序号镜像（supervisor.create_mailboxes 递增次序：g2p_queue=0
@@ -563,14 +546,6 @@ class TtsClaimQueue:
             item["_q_ts"] = time.time()
         return item
 
-    def cancel_add(self, req_id: str) -> None:
-        """统一走模块级 ZSET 语义（深度审计 F2：曾 SADD 写 ZSET 键 →
-        首次断连后全池认领 WRONGTYPE）。"""
-        cancel_add(req_id)
-
-    def is_cancelled(self, req_id: str) -> bool:
-        return is_cancelled(req_id)
-
     def cancelled_set(self, req_ids) -> set:
         """批量断连标记查询（单次 RTT）：一批 chunk 常来自同几个请求，
         逐条 ZSCORE 是 B 次 RTT——pipeline 合一。返回已取消的 req_id 集。"""
@@ -665,19 +640,17 @@ class TtsClaimQueue:
         for m in members:
             chunk, _seq = decode_member(m)
             if chunk is None:
-                # 真损坏（两种头都解不出）：丢弃并计数——否则该消息每轮被
+                # 真损坏（头/载荷解不出）：丢弃并计数——否则该消息每轮被
                 # 认领 → 崩 worker → 重派循环（put_nowait 事故同构）。
-                # 旧格式 member 不在此列（decode_member 已兼容）。
                 bad.append(m)
                 continue
             ts = chunk.pop("_q_ts", None)
             if isinstance(ts, (int, float)):   # 损坏的非数值 _q_ts 不能炸 claim
                 w = (now - ts) * 1000
                 waits_ms.append(w)
-                chunk["_qw_ms"] = w   # 逐条等待随 chunk 回传（ship_batch 捎给网关）
                 # 请求级排队跨度用：入队时刻 + 本批认领时刻。网关对同请求
                 # 全部 chunk 取 min(入队)/max(认领)，得到"第一个进队到最后一个
-                # 出队"的墙钟跨度；不再把逐 chunk 等待求和。
+                # 出队"的墙钟跨度。
                 chunk["_q_enq"] = ts
                 chunk["_q_claim"] = now
             out.append((m, chunk))

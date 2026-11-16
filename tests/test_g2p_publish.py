@@ -45,5 +45,5 @@ def test_publish_chunks_partial_failure_sends_error_and_cancel():
     assert msg["req_id"] == "r-pub"
     assert msg["kind"] == protocol.KIND_COMPUTE
     # 已入队的第 1 条由 tts 认领侧按 cancel 标记过滤
-    assert proc_common.is_cancelled("r-pub") is True
+    assert proc_common.shared_redis().zscore("kokoro:cancel", "r-pub") is not None
     proc_common.shared_redis().zrem("kokoro:cancel", "r-pub")

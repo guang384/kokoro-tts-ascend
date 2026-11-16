@@ -26,7 +26,7 @@ def gw(monkeypatch):
     monkeypatch.setattr(gateway, "_entry_stats",
                         {"requests": 0, "results": 0, "timeouts": 0,
                          "failed": 0, "rejections": 0, "swept": 0,
-                         "cancelled": 0, "latency_s": {}, "latency_ms_sum": 0.0})
+                         "cancelled": 0, "latency_ms_sum": 0.0})
     return gateway
 
 
@@ -243,9 +243,9 @@ def test_agg_add_dedupes_redispatched_part(gw):
 
 # ── 阶段耗时聚合（/tts 日志分解）──
 
-def test_synth_part_timings_max_and_sum(gw):
-    """g2p/q_g2p 整单同值 → 跨批取 max（不随批数翻倍）；
-    tts/q_tts 批份额 → 跨批求和（缺戳时的兜底口径）。"""
+def test_synth_part_timings_max_and_span(gw):
+    """q_g2p/g2p 整单同值 → 跨批取 max（不随批数翻倍）；
+    q_tts/tts 为请求级墙钟跨度（seg 级戳推算，非逐 chunk 求和）。"""
     loop = _loop()
     fut = loop.create_future()
     rid = "r13"
@@ -253,22 +253,26 @@ def test_synth_part_timings_max_and_sum(gw):
     gw._request_meta[rid] = {"needs_align": False, "created": time.time()}
     b1, shm1, _a = _block([(0, "一")])
     b2, shm2, _a2 = _block([(1, "二")])
+    b1["segs"][0].update(q_enq=100.0, q_claim=101.0)
+    b2["segs"][0].update(q_enq=100.5, q_claim=103.0)
     try:
         _on_synth_part(protocol.synth_part(rid, 2, b1, timings={
-            "q_g2p": 5.0, "g2p": 100.0, "q_tts": 3.0, "tts": 800.0}))
+            "q_g2p": 5.0, "g2p": 100.0, "tts_done": 102.0}))
         _on_synth_part(protocol.synth_part(rid, 2, b2, timings={
-            "q_g2p": 5.0, "g2p": 100.0, "q_tts": 4.0, "tts": 400.0}))
+            "q_g2p": 5.0, "g2p": 100.0, "tts_done": 104.0}))
         r = fut.result()
         assert r["timings"] == {"q_g2p": 5.0, "g2p": 100.0,
-                                "q_tts": 7.0, "tts": 1200.0, "chunks": 2}
+                                "q_tts": 3000.0,   # 103.0-100.0（入队→认领）
+                                "tts": 3000.0,     # 104.0-101.0（首认领→末前向完成）
+                                "chunks": 2}
     finally:
         _shm_drop(shm1)
         _shm_drop(shm2)
 
 
 def test_tts_span_first_claim_to_last_forward_done(gw):
-    """tts 新口径：首个 chunk 认领 → 末块前向完成的请求级墙钟跨度
-    （非逐 chunk 份额求和）；chunks = need 随 timings 带回。"""
+    """tts 请求级墙钟跨度 = 首个 chunk 认领 → 末块前向完成；
+    chunks = need 随 timings 带回。"""
     loop = _loop()
     fut = loop.create_future()
     rid = "r-tts-span"
@@ -279,7 +283,6 @@ def test_tts_span_first_claim_to_last_forward_done(gw):
     b["segs"][1].update(q_claim=200.5)
     try:
         _on_synth_part(protocol.synth_part(rid, 2, b, timings={
-            "q_tts": 999.0, "tts": 999.0,   # 旧口径字段：有完整戳时不用它
             "tts_done": 202.0}))
         r = fut.result()
         assert r["timings"]["tts"] == 2000.0   # 202.0-200.0
@@ -289,8 +292,8 @@ def test_tts_span_first_claim_to_last_forward_done(gw):
         _shm_drop(shm)
 
 
-def test_tts_span_fallback_to_sum_without_done_stamp(gw):
-    """旧 worker 消息缺 tts_done 戳（有认领）：跨度不齐 → 回退算力总和。"""
+def test_tts_missing_done_stamp_zero(gw):
+    """异常消息缺 tts_done 戳（有认领）：tts 跨度按 0 计，交付不炸。"""
     loop = _loop()
     fut = loop.create_future()
     rid = "r-tts-fb"
@@ -300,37 +303,11 @@ def test_tts_span_fallback_to_sum_without_done_stamp(gw):
     b["segs"][0].update(q_claim=200.0)
     b["segs"][1].update(q_claim=201.0)
     try:
-        _on_synth_part(protocol.synth_part(rid, 2, b, timings={
-            "q_tts": 7.0, "tts": 1500.0}))
+        _on_synth_part(protocol.synth_part(rid, 2, b))
         r = fut.result()
-        assert r["timings"]["tts"] == 1500.0   # 回退求和，不是 1000/1500 混算
+        assert r["timings"]["tts"] == 0.0
     finally:
         _shm_drop(shm)
-
-
-def test_partial_overlap_timings_scaled_by_fresh(gw):
-    """部分重叠重试批：timings 覆盖整块成员，只能按 fresh 占比计入，
-    否则 q_tts/tts 会把已收过的 seg 再计一遍（阶段日志虚高）。"""
-    loop = _loop()
-    fut = loop.create_future()
-    rid = "r13b"
-    gw._pending[("req", rid)] = fut
-    gw._request_meta[rid] = {"needs_align": True, "created": time.time()}
-    b1, shm1, _a = _block([(0, "一"), (1, "二"), (2, "三"), (3, "四")])
-    b2, shm2, _a2 = _block([(3, "四"), (4, "五")])
-    try:
-        _on_synth_part(protocol.synth_part(rid, 8, b1, timings={
-            "q_g2p": 5.0, "g2p": 100.0, "q_tts": 40.0, "tts": 800.0}))
-        _on_synth_part(protocol.synth_part(rid, 8, b2, timings={
-            "q_g2p": 5.0, "g2p": 100.0, "q_tts": 40.0, "tts": 400.0}))
-        st = gw._agg_state[rid]
-        assert st["idxs"] == {0, 1, 2, 3, 4}
-        # b2: fresh=1 / all=2 → tts 400×0.5=200、q_tts 40×0.5=20
-        assert st["t_tts"] == 1000.0
-        assert st["t_q_tts"] == 60.0
-    finally:
-        _shm_drop(shm1)
-        _shm_drop(shm2)
 
 
 def test_q_tts_span_first_enqueue_to_last_claim(gw):
@@ -370,8 +347,8 @@ def test_q_tts_span_ignores_duplicate_seg_claim(gw):
         _shm_drop(shm2)
 
 
-def test_synth_part_timings_legacy_absent_zero(gw):
-    """旧 worker 消息无 timings → 聚合不炸，耗时按 0 计。"""
+def test_synth_part_timings_absent_zero(gw):
+    """消息无 timings → 聚合不炸，耗时按 0 计。"""
     loop = _loop()
     fut = loop.create_future()
     rid = "r14"
@@ -388,7 +365,8 @@ def test_synth_part_timings_legacy_absent_zero(gw):
 
 
 def test_synth_part_duplicate_delivery_no_double_count(gw):
-    """重派重复投递（与块幂等同一拦截线）：重复 part 的耗时也不双计。"""
+    """重派重复投递（与块幂等同一拦截线）：首个 part 即交付，重复 part
+    按孤儿回收，其晚认领戳不影响已交付的跨度。"""
     loop = _loop()
     fut = loop.create_future()
     rid = "r15"
@@ -396,13 +374,16 @@ def test_synth_part_duplicate_delivery_no_double_count(gw):
     gw._request_meta[rid] = {"needs_align": False, "created": time.time()}
     b1, shm1, _a = _block([(0, "一")])
     b2, shm2, _a2 = _block([(0, "一")])
+    b1["segs"][0].update(q_enq=100.0, q_claim=101.0)
+    b2["segs"][0].update(q_enq=100.0, q_claim=105.0)   # 重复 seg 的晚 claim
     try:
         _on_synth_part(protocol.synth_part(rid, 1, b1, timings={
-            "q_g2p": 5.0, "g2p": 100.0, "q_tts": 3.0, "tts": 800.0}))
+            "q_g2p": 5.0, "g2p": 100.0, "tts_done": 102.0}))
         _on_synth_part(protocol.synth_part(rid, 1, b2, timings={
-            "q_g2p": 5.0, "g2p": 100.0, "q_tts": 3.0, "tts": 800.0}))
+            "q_g2p": 5.0, "g2p": 100.0, "tts_done": 106.0}))
         r = fut.result()
-        assert r["timings"]["tts"] == 800.0 and r["timings"]["q_tts"] == 3.0
+        assert r["timings"]["q_tts"] == 1000.0    # 101.0-100.0，105 不拉长
+        assert r["timings"]["tts"] == 1000.0      # 102.0-101.0
     finally:
         _shm_drop(shm1)
         _shm_drop(shm2)

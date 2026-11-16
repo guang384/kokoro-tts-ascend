@@ -2,7 +2,7 @@
 """asr 批推 vs 逐条单推 的一致性验证（自动选设备：有 NPU 上卡，无卡 CPU）。
 
 四个判定关卡（进退出码）:
-  A. 批推一致性:   timestamp_batch(B=6, 变长音频+变长文本) 与逐条
+  A. 批推一致性:   _generate_batch(B=6, 变长音频+变长文本) 与逐条
      timestamp() 的字级时间戳必须逐条完全相等（int ms）——混合长度批
      经 _install_batch_safe_predictor 补丁逐条分解 predictor 段
   B. B=1 退化回归: 批入口单条 == 单条入口（同解码函数同前向）
@@ -105,7 +105,7 @@ def main() -> int:
     single = [funasr_ts.timestamp(a, t, SR) for a, t in zip(audios, texts)]
     t_single = time.perf_counter() - t0
     t0 = time.perf_counter()
-    batch = funasr_ts.timestamp_batch(audios, texts, SR)
+    batch = funasr_ts._generate_batch(model, audios, texts, SR)
     t_batch = time.perf_counter() - t0
     for i, (s, b) in enumerate(zip(single, batch)):
         ts_s, ts_b = s.get("timestamp"), b.get("timestamp")
@@ -121,7 +121,7 @@ def main() -> int:
 
     # B. B=1 退化回归
     s1 = funasr_ts.timestamp(audios[0], texts[0], SR)
-    b1 = funasr_ts.timestamp_batch([audios[0]], [texts[0]], SR)[0]
+    b1 = funasr_ts._generate_batch(model, [audios[0]], [texts[0]], SR)[0]
     same = s1.get("timestamp") == b1.get("timestamp")
     ok &= same
     print(f"[{'PASS' if same else 'FAIL'}] B=1 退化回归")
@@ -132,7 +132,7 @@ def main() -> int:
     eq_audios = [_audio(2.0, 2000 + i) for i in range(4)]
     eq_texts = TEXTS[:4]
     single_eq = [funasr_ts.timestamp(a, t, SR) for a, t in zip(eq_audios, eq_texts)]
-    batch_eq = funasr_ts.timestamp_batch(eq_audios, eq_texts, SR)
+    batch_eq = funasr_ts._generate_batch(model, eq_audios, eq_texts, SR)
     same = all(s.get("timestamp") == b.get("timestamp")
                for s, b in zip(single_eq, batch_eq))
     ok &= same

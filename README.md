@@ -1,4 +1,4 @@
-# kokoros-tts-image
+# kokoro-tts-ascend
 
 Kokoro TTS（`hexgrad/Kokoro-82M-v1.1-zh`，103 中文音色 + 中英混合）的
 **昇腾 Atlas 800T A2 / 910B 容器镜像**：
@@ -373,8 +373,8 @@ curl -s http://127.0.0.1:5174/v1/audio/speech -H 'Content-Type: application/json
 
 - 凑批按 (音素长度类, dtype) 隔离不混批；拉模式无等待——孤立的 fp16 请求
   立即按 B=1 执行（延迟更低），只损失单句产能效率（5% 灰度流量总损失 ~1%）。
-- 进程级 `KOKORO_DTYPE` 环境变量**已退役**：启动时检测到非 fp32 值会打
-  WARNING 并忽略——精度只看请求参数，避免"以为开了 fp16"的部署事故。
+- 精度只看请求参数 `dtype`（fp32/fp16），无进程级开关——避免"以为开了
+  fp16"的部署事故。
 - `scripts/ab_quality_test.py`：同文本双精度各合成一遍 → 单文件 HTML（音频
   base64 内嵌）→ 盲听评分 + 时间戳漂移等客观指标 → 导出验收 JSON。
   整页固定一次随机 A/B 映射（每份报告随机种子），评分期间不揭示精度、
@@ -394,7 +394,7 @@ curl -s http://127.0.0.1:5174/v1/audio/speech -H 'Content-Type: application/json
   的 EMA，不含 per-worker 在途数与服务时间——worker 刚把队列领空、正忙一批时 depth=0，瞬时 burst 可能
   放行；worker 全停摆期 EMA 也会冻结。这些场景由单一截止线 + 超时取消兜底，停摆检测靠 supervisor 看门狗。
 
-> 时间戳段数契约：`timestamp` 段数**恒等于**文本的可对齐字符数（中文字 + ASCII 字母/数字，`[\u4e00-\u9fff0-9A-Za-z]`）。强制对齐模型按"中文逐字、英文词/数字串整体"分单元（如 "Token" 一个单元），服务端在回投前把多字单元的窗口均分到单元内各字符（funasr_ts.bind_char_timestamps），单元粒度不再影响段数。单元清单按分词规则从**输入文本**重建、不依赖 generate 的 text 回显（group/batch_group_timestamp 回填的 text 是输入原文，20261116 取证：scripts/repro/probe_text_format.py）；对齐吞段时按位置比例兜底，段数契约不破。发音↔高亮的逐字对应由此可直接按下标绑定。
+> 时间戳段数契约：`timestamp` 段数**恒等于**文本的可对齐字符数（中文字 + ASCII 字母/数字，`[\u4e00-\u9fff0-9A-Za-z]`）。强制对齐模型按"中文逐字、英文词/数字串整体"分单元（如 "Token" 一个单元），服务端在回投前把多字单元的窗口均分到单元内各字符（funasr_ts.bind_char_timestamps），单元粒度不再影响段数。单元清单按分词规则从**输入文本**重建、不依赖 generate 的 text 回显（group/batch_group_timestamp 回填的 text 是输入原文，20261116 取证，探针脚本见 git 历史）；对齐吞段时按位置比例兜底，段数契约不破。发音↔高亮的逐字对应由此可直接按下标绑定。
 
 ### /health（唯一探针地址，五键）
 

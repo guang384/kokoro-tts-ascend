@@ -145,7 +145,7 @@ def test_cancelled_set_batch_lookup(fakeredis_client, monkeypatch):
         pc.shared_redis().zrem("kokoro:cancel", "r-gone")
 
 
-# ── 逐条排队等待随消息带回（/tts 日志阶段分解的 q_* 口径）──
+# ── 入队/认领时刻随消息带回（网关算请求级排队跨度）──
 
 def test_get_injects_qw_ms(q):
     """LIST 队列 get：_q_ts 换算的逐条等待注入 _qw_ms，戳本身用后即除。"""
@@ -163,8 +163,9 @@ def test_external_item_without_stamp_gets_no_qw_ms(q):
     assert got["req_id"] == "r2" and "_qw_ms" not in got
 
 
-def test_claim_injects_qw_ms(fakeredis_client, monkeypatch):
-    """认领式队列：逐条等待随 chunk 回传（ship_batch 捎给网关），EMA 口径不变。"""
+def test_claim_injects_enq_claim_stamps(fakeredis_client, monkeypatch):
+    """认领式队列：认领后 chunk 带入队/认领时刻（网关对同请求取
+    min/max 得请求级排队跨度），EMA 口径不变。"""
     monkeypatch.setattr(pc, "_make_redis_client", lambda: fakeredis_client)
     q = pc.TtsClaimQueue(16, index=53, name="qw")
     q.put_nowait({"req_id": "a", "idx": 0, "ps": "x", "voice": "v",
@@ -172,7 +173,8 @@ def test_claim_injects_qw_ms(fakeredis_client, monkeypatch):
     claimed = q.claim(4, "tts-0-1")
     assert len(claimed) == 1
     _m, c = claimed[0]
-    assert isinstance(c.get("_qw_ms"), float) and c["_qw_ms"] >= 0.0
+    assert isinstance(c.get("_q_enq"), float) and c["_q_enq"] <= c["_q_claim"]
+    assert isinstance(c.get("_q_claim"), float)
     assert "_q_ts" not in c
     q.ack([_m], "tts-0-1")
 

@@ -171,18 +171,6 @@ def _latency_bins() -> list:
     return bins
 
 
-def _legacy_latency_view(bins: list) -> dict:
-    """旧 collector / 旧网关的 4 桶视图（区间计数），由新桶累加派生。
-
-    滚动升级期间旧口径（lt1/1to5/5to30/gt30）不断档，旧 collector 忽略
-    latency_bins/latency_bounds 未知字段即可。"""
-    def upto(upper: float) -> int:
-        return sum(bins[:bisect.bisect_left(_LATENCY_BUCKETS, upper) + 1])
-
-    return {"lt1": bins[0], "1to5": upto(5) - bins[0],
-            "5to30": upto(30) - upto(5), "gt30": sum(bins) - upto(30)}
-
-
 def _worker_snapshot() -> dict:
     """本进程的实时状态快照（心跳落盘 + /health 聚合共用）。入口角色。"""
     wtag = os.getenv("WORKER_TAG") or f"pid{os.getpid()}"
@@ -190,7 +178,6 @@ def _worker_snapshot() -> dict:
     bins = list(_latency_bins())
     stats["latency_bins"] = bins
     stats["latency_bounds"] = [float(b) for b in _LATENCY_BUCKETS]
-    stats["latency_s"] = _legacy_latency_view(bins)
     entries = _snapshot_window(_recent_latencies)
     if entries:
         # 以 sum/count 形态上报：/health 顶层 e2e 需跨网关加权合并
@@ -432,13 +419,12 @@ def _agg_add(res: dict):
             return None, False
         st = _agg_state[rid] = {"need": max(1, int(res["need"])), "idxs": set(),
                                 "blocks": [], "texts": {}, "created": time.time(),
-                                "t_tts": 0.0, "t_q_tts": 0.0,
                                 "t_g2p": 0.0, "t_q_g2p": 0.0,
                                 # 请求级 TTS 排队跨度：min(首 chunk 入队) /
-                                # max(末 chunk 出队)。缺失时回退旧 sum 口径。
+                                # max(末 chunk 出队)（seg 级 q_enq/q_claim）。
                                 "t_q_tts_first": None, "t_q_tts_last": None,
                                 # 请求级 TTS 墙钟跨度：min(首 chunk 认领) /
-                                # max(末块前向完成)。缺失时回退 t_tts 求和。
+                                # max(末块前向完成 tts_done)。
                                 "t_tts_claim_first": None,
                                 "t_tts_done_last": None}
     # 幂等去重：worker 死亡后认领队列会把在途 chunk 精确重派（at-least-once），
@@ -457,14 +443,10 @@ def _agg_add(res: dict):
     res["block"]["segs"] = fresh
     t = res.get("timings")
     if t and fresh:   # 只随实际入账的新 segs 计时（重复投递上面已拦，防御性兜底）
-        # g2p 整单一次算、各 chunk 同值 → 取 max；q_tts/tts 为各批份额 → 求和。
-        # 部分重叠批的 timings 覆盖整块成员（含已收过的 segs）——按 fresh
-        # 占比折算，否则重试会把 q_tts/tts 重复计入阶段日志。
-        frac = len(fresh) / len(all_segs) if all_segs else 0.0
+        # q_g2p/g2p 整单一次算、各 chunk 同值 → 取 max（重派批覆盖整块
+        # 成员，max 口径对重复/部分重叠投递天然幂等）；tts_done 同理取 max。
         st["t_q_g2p"] = max(st["t_q_g2p"], float(t.get("q_g2p", 0.0)))
         st["t_g2p"] = max(st["t_g2p"], float(t.get("g2p", 0.0)))
-        st["t_q_tts"] += float(t.get("q_tts", 0.0)) * frac
-        st["t_tts"] += float(t.get("tts", 0.0)) * frac
         done = t.get("tts_done")
         if isinstance(done, (int, float)):
             st["t_tts_done_last"] = (done if st["t_tts_done_last"] is None
@@ -491,15 +473,6 @@ def _agg_add(res: dict):
                                else min(st["t_q_tts_first"], e))
         st["t_q_tts_last"] = (c_ if st["t_q_tts_last"] is None
                               else max(st["t_q_tts_last"], c_))
-    elif t:
-        # 兼容只带消息级 first/last、没有 per-seg 字段的生产者
-        e, c_ = t.get("q_tts_first"), t.get("q_tts_last")
-        if isinstance(e, (int, float)):
-            st["t_q_tts_first"] = (e if st["t_q_tts_first"] is None
-                                   else min(st["t_q_tts_first"], e))
-        if isinstance(c_, (int, float)):
-            st["t_q_tts_last"] = (c_ if st["t_q_tts_last"] is None
-                                  else max(st["t_q_tts_last"], c_))
     if len(st["idxs"]) < st["need"]:
         return None, False
     _agg_state.pop(rid, None)
@@ -511,16 +484,14 @@ def _deliver(fut, st: dict, texts: list) -> bool:
     if fut is None or fut.done():
         _unlink_blocks(st["blocks"])
         return False
-    q_tts = st["t_q_tts"]
+    # 请求级墙钟跨度（同版本 worker 恒带戳；异常缺戳按 0 计，不炸交付）：
+    # q_tts = 首个 chunk 入队 → 最后一个 chunk 被认领；
+    # tts = 首个 chunk 认领 → 末块前向完成。
+    q_tts = tts_ms = 0.0
     if (st["t_q_tts_first"] is not None
             and st["t_q_tts_last"] is not None):
-        # 请求级墙钟跨度：首个 chunk 入队 → 最后一个 chunk 被认领。
-        # 旧消息无 timestamps 时回退逐 chunk 求和（兼容升级期）。
         q_tts = max(0.0, (st["t_q_tts_last"]
                           - st["t_q_tts_first"]) * 1000)
-    # tts = 首个 chunk 认领 → 末块前向完成的墙钟跨度；缺戳（旧 worker 消息）
-    # 回退算力总和（并行通道份额加总，仅升级期兜底）。
-    tts_ms = st["t_tts"]
     if (st["t_tts_claim_first"] is not None
             and st["t_tts_done_last"] is not None):
         tts_ms = max(0.0, (st["t_tts_done_last"]
@@ -583,12 +554,11 @@ def _on_chunk_ts(res: dict) -> None:
             return  # 请求已终结（超时/取消/失败）：孤儿丢弃
         st = _ts_state[rid] = {"need": max(1, int(res.get("need", 1))),
                                "items": {}, "created": time.time(),
-                               "t_asr": 0.0, "t_q_asr": 0.0,
                                # 请求级 ASR 排队跨度：min(首 job 入队) /
-                               # max(末 job 出队)；缺失时回退旧 sum 口径。
+                               # max(末 job 出队)（job 级 _q_enq/_q_claim）。
                                "t_q_asr_first": None, "t_q_asr_last": None,
                                # 请求级 ASR 墙钟跨度：min(首 job 认领) /
-                               # max(末桶完成)；缺失时回退 t_asr 求和。
+                               # max(末桶完成 asr_done)。
                                # asr_buckets = 桶起始时刻去重集合 → asr_fw。
                                "t_asr_claim_first": None,
                                "t_asr_done_last": None,
@@ -609,9 +579,7 @@ def _on_chunk_ts(res: dict) -> None:
     if idx in st["items"]:
         return  # 重派重复投递：幂等
     t = res.get("timings")
-    if t:   # 对齐计算逐 chunk 累加；q_asr/asr 同时维护请求级跨度
-        st["t_asr"] += float(t.get("asr", 0.0))
-        st["t_q_asr"] += float(t.get("q_asr", 0.0))
+    if t:   # 只维护请求级跨度戳（请求级耗时由跨度计算，不求和）
         e, c_ = t.get("q_asr_first"), t.get("q_asr_last")
         if isinstance(e, (int, float)):
             st["t_q_asr_first"] = (e if st["t_q_asr_first"] is None
@@ -645,14 +613,13 @@ def _on_chunk_ts(res: dict) -> None:
         offset_ms += samples / _sample_rate * 1000 + _CHUNK_GAP_S * 1000
     fut_ts = _pending.pop(("ts", rid), None)
     if fut_ts is not None and not fut_ts.done():
-        q_asr = st["t_q_asr"]
+        # 请求级墙钟跨度（同版本 worker 恒带戳；异常缺戳按 0 计）：
+        # q_asr = 首 job 入队 → 末 job 出队；asr = 首 job 认领 → 末桶完成。
+        q_asr = asr_ms = 0.0
         if (st["t_q_asr_first"] is not None
                 and st["t_q_asr_last"] is not None):
             q_asr = max(0.0, (st["t_q_asr_last"]
                               - st["t_q_asr_first"]) * 1000)
-        # asr = 首 job 认领 → 末桶推理完成的墙钟跨度；缺戳（旧 worker
-        # 消息）回退算力总和（按音频时长分摊份额加总，仅升级期兜底）。
-        asr_ms = st["t_asr"]
         if (st["t_asr_claim_first"] is not None
                 and st["t_asr_done_last"] is not None):
             asr_ms = max(0.0, (st["t_asr_done_last"]
@@ -964,8 +931,9 @@ def _collect() -> dict:
 
     # 跨网关延迟桶聚合（SO_REUSEPORT 下连续抓取命中不同进程——直方图必须
     # 用全实例求和，读本进程 _entry_stats 会让 rate/quantile 剧烈跳动）。
-    # 新心跳带 latency_bounds 校验，边界不一致（滚动升级/配置漂移）时回退
-    # 旧 4 桶：1/5/30/+Inf 仍精确，中间新档位偏保守（不低估长尾）。
+    # 心跳带 latency_bounds 校验；同容器内所有网关同版本同配置，边界必然
+    # 一致——不一致（异常心跳/配置漂移）时跳过该实例的桶计数，绝不把
+    # 错误粒度的 bins 直接相加污染直方图。
     nbins = len(_LATENCY_BUCKETS) + 1
     expect_bounds = [float(b) for b in _LATENCY_BUCKETS]
     lat = {"bins": [0] * nbins, "ms_sum": 0.0, "count": 0}
@@ -977,15 +945,6 @@ def _collect() -> dict:
                 and all(isinstance(v, (int, float)) for v in bins)):
             for i, v in enumerate(bins):
                 lat["bins"][i] += v
-        else:
-            legacy = st.get("latency_s") or {}
-            for key, upper in (("lt1", 1), ("1to5", 5), ("5to30", 30),
-                               ("gt30", None)):
-                n = legacy.get(key) or 0
-                if n:
-                    idx = nbins - 1 if upper is None else bisect.bisect_left(
-                        _LATENCY_BUCKETS, upper)
-                    lat["bins"][idx] += n
         lat["ms_sum"] += st.get("latency_ms_sum") or 0
     lat["count"] = sum(lat["bins"])
     # 滑动窗口分位数聚合：分位数在数学上不可跨实例合并，两个入口经
@@ -1345,8 +1304,8 @@ async def _synth(text: str, voice: str, speed: float, needs_align: bool,
     WAIT_TIMEOUT_S（音频/对齐不再各 120s 串联）。
 
     返回 (audio, texts, fw, req_id, blocks_desc, timings, agg_s)；
-    timings 为各阶段耗时（毫秒，{"q_g2p","g2p","q_tts","tts"}，随 worker
-    消息捎带，旧消息缺字段为 0）；agg_s 为网关侧 SHM 读出+拼接耗时（秒）；
+    timings 为请求级阶段耗时（毫秒，{"q_g2p","g2p","q_tts","tts","chunks"}，
+    由网关按 worker 捎带的跨度戳计算）；agg_s 为网关侧 SHM 读出+拼接耗时（秒）；
     audio 恒为拼接后的新数组（不回传 SHM 视图，杜绝悬垂）。
     release_shm=True（/v1）：聚合完成即收尾统一 unlink SHM；
     release_shm=False（/tts）：对齐阶段 asr 还要按名 attach 读块——本函数
@@ -1580,7 +1539,7 @@ def _record_failure(status: int, reason: str) -> None:
 # 显式配置只能调大不能调小（低于公式值被抬高）。
 SHM_ORPHAN_MAX_AGE_S = max(
     proc_common.env_float("SHM_ORPHAN_MAX_AGE_S", 300.0, minimum=30.0),
-    2 * proc_common.env_float("WAIT_TIMEOUT_S", 120.0, minimum=1.0) + 60.0)
+    2 * _entry_wait_s + 60.0)   # WAIT_TIMEOUT_S 只在模块头解析一次
 _SHM_SWEEP_DIR = "/dev/shm"    # 音频 SHM 所在 tmpfs（测试可替换）
 
 

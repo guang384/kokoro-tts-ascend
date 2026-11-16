@@ -35,7 +35,7 @@ def gw(monkeypatch, tmp_path):
         "requests": 0, "results": 0, "timeouts": 0, "failed": 0,
         "rejections": 0, "fast_reject": 0, "server_5xx": 0,
         "last_5xx_ts": 0.0, "swept": 0, "cancelled": 0,
-        "latency_s": {}, "latency_ms_sum": 0.0})
+        "latency_ms_sum": 0.0})
     gateway._recent_failures.clear()
     monkeypatch.setattr(gateway, "_health_dir", str(tmp_path))
     monkeypatch.setattr(gateway, "_asr_ready", lambda: True)

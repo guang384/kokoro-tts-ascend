@@ -87,9 +87,10 @@ def test_ship_batch_mixed_requests_carry_own_need():
                 pass
 
 
-def test_ship_batch_emits_q_tts_span_fields():
-    """ship_batch 必须把 chunk 的入队/认领时刻带到 synth_part：
-    消息级 q_tts_first/last + seg 级 q_enq/q_claim（网关算请求级跨度）。"""
+def test_ship_batch_emits_span_stamps():
+    """ship_batch 必须把 chunk 的入队/认领时刻带到 synth_part 的 seg 级
+    q_enq/q_claim（网关算请求级跨度）+ 批级 tts_done 戳；求和口径字段
+    （q_tts/tts/q_tts_first/q_tts_last）已删除，请求级耗时全由网关按戳算。"""
     chunk = protocol.chunk("r-span", 0, "ps0", "zf_001", 1.0, 0, 1, "句")
     chunk["_q_enq"] = 100.0
     chunk["_q_claim"] = 101.0
@@ -98,8 +99,10 @@ def test_ship_batch_emits_q_tts_span_fields():
     compute.ship_batch(_PosStub(), {"batch_id": "b-span", "chunks": [chunk]},
                        [gq], FakeQueue(), log, np, shared_memory)
     part = gq.get_nowait()
-    assert part["timings"]["q_tts_first"] == 100.0
-    assert part["timings"]["q_tts_last"] == 101.0
+    assert "q_tts" not in part["timings"] and "tts" not in part["timings"]
+    assert "q_tts_first" not in part["timings"]
+    assert "q_tts_last" not in part["timings"]
+    assert part["timings"]["q_g2p"] == 0.0 and part["timings"]["g2p"] == 0.0
     # tts 墙钟跨度终点戳（前向结束时刻；网关对同请求取 max）
     assert isinstance(part["timings"].get("tts_done"), float)
     seg = part["block"]["segs"][0]
@@ -247,7 +250,8 @@ def _cleanup_shm_after_test():
 
 def test_run_asr_batch_replies_each_job(monkeypatch):
     """3 job 一批：单次批推、逐 job chunk_ts 顺序一一对应、timings 携带
-    q_asr/asr。funasr_ts.batch_group_timestamp 打桩记录调用形态。"""
+    跨度戳（q_asr_first/last、asr_done）。funasr_ts.batch_group_timestamp
+    打桩记录调用形态。"""
     import funasr_ts
 
     calls = []
@@ -270,46 +274,13 @@ def test_run_asr_batch_replies_each_job(monkeypatch):
     # 桩返回单元文本=chunk 原文"你好"（1 段）→ 绑定摊平为逐字 2 段
     assert all(m["error"] is None
                and m["timestamp"] == [[0, 25], [25, 50]] for m in msgs)
-    assert all(m["timings"]["q_asr"] == 0.0 and m["timings"]["asr"] >= 0.0
+    # 求和口径字段已删；桩 job 无 _q_enq/_q_claim → None，asr_done 恒带
+    assert all("q_asr" not in m["timings"] and "asr" not in m["timings"]
+               and m["timings"]["q_asr_first"] is None
+               and m["timings"]["q_asr_last"] is None
+               and isinstance(m["timings"]["asr_done"], float)
                for m in msgs)
     assert calls == [{"n": 3, "rate": 24000, "mgs": 30.0}]     # 单次批推
-
-
-def test_run_asr_batch_asr_timing_amortized(monkeypatch):
-    """timings.asr 按音频时长摊销：2 条等长 job 一批 100ms → 各 50ms，
-    逐 chunk 求和 = 该批墙钟（不再每 job 复制整批 100ms）。"""
-    import funasr_ts
-
-    class _Clock:
-        """只替换 compute 模块内的 time 引用（不动全局 time，避免干扰
-        pytest/日志；_run_asr_batch 的两次 perf_counter 相差固定 100ms）。
-        time() 返回当前累计值——asr_done/asr_bucket 跨度戳只为网关存在，
-        不影响摊销断言。"""
-        def __init__(self):
-            self.t = 0.0
-
-        def perf_counter(self):
-            self.t += 0.1
-            return self.t
-
-        def time(self):
-            return self.t
-    monkeypatch.setattr(compute, "time", _Clock())
-
-    monkeypatch.setattr(
-        funasr_ts, "batch_group_timestamp",
-        lambda items, rate, max_group_sec=None: [
-            {"text": "".join(t), "timestamp": []} for _a, t in items])
-    gq = FakeQueue()
-    log = proc_common.setup_logging("test-asr")
-    jobs, shms = zip(*[_asr_job_block(f"r{i}", i) for i in range(2)])
-    try:
-        compute._run_asr_batch(list(jobs), [gq], log)
-    finally:
-        _cleanup_shm(shms)
-    msgs = _drain(gq)
-    assert [m["timings"]["asr"] for m in msgs] == [50.0, 50.0]
-    assert sum(m["timings"]["asr"] for m in msgs) == 100.0
 
 
 def test_run_asr_batch_shm_failure_isolated(monkeypatch):

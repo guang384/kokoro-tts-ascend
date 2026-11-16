@@ -138,67 +138,70 @@ def test_error_after_success_not_flipped(gw):
 
 # ── 阶段耗时随行（/tts 日志分解的 asr 段）──
 
-def test_chunk_ts_timings_sum_and_idempotent(gw):
-    """asr 计算/队列等待逐 chunk 累加（缺戳时的兜底口径）；
-    重复 idx（at-least-once 双投）不双计。"""
+def test_chunk_ts_timings_idempotent(gw):
+    """重复 idx（at-least-once 双投）整条消息幂等丢弃，不推进跨度；
+    收齐后按跨度戳出账。"""
     loop, fut = _fut(gw, "r9")
     gw._on_chunk_ts(protocol.chunk_ts("r9", 0, 2, 800, [[0, 50]],
-                                      timings={"q_asr": 1.0, "asr": 200.0}))
+                                      timings={"q_asr_first": 100.0,
+                                               "q_asr_last": 101.0,
+                                               "asr_done": 103.0}))
     gw._on_chunk_ts(protocol.chunk_ts("r9", 0, 2, 800, [[0, 50]],
-                                      timings={"q_asr": 1.0, "asr": 200.0}))
+                                      timings={"q_asr_first": 100.0,
+                                               "q_asr_last": 105.0,
+                                               "asr_done": 109.0}))   # 重复
     gw._on_chunk_ts(protocol.chunk_ts("r9", 1, 2, 800, [[60, 110]],
-                                      timings={"q_asr": 2.0, "asr": 300.0}))
+                                      timings={"q_asr_first": 100.2,
+                                               "q_asr_last": 103.0,
+                                               "asr_done": 104.0}))
     assert fut.done()
-    assert fut.result()["timings"] == {"asr": 500.0, "q_asr": 3.0, "asr_fw": 0}
+    r = fut.result()["timings"]
+    assert r["q_asr"] == 3000.0    # 103.0-100.0（重复的 105 整条丢弃，不拉长）
+    assert r["asr"] == 3000.0      # 104.0-101.0
     loop.close()
 
 
 def test_asr_span_first_claim_to_last_bucket_done(gw):
-    """asr 新口径：首 job 认领 → 末桶推理完成的请求级墙钟跨度（非逐 chunk
+    """asr 请求级墙钟跨度 = 首 job 认领 → 末桶推理完成（非逐 chunk
     份额求和）；asr_fw = 桶起始时刻去重计数（多桶 = ASR 分桶/跨批）。"""
     loop, fut = _fut(gw, "r-asr-span")
     gw._on_chunk_ts(protocol.chunk_ts(
         "r-asr-span", 0, 3, 800, [[0, 50]],
-        timings={"q_asr": 1.0, "asr": 999.0,
-                 "q_asr_first": 100.0, "q_asr_last": 100.5,
+        timings={"q_asr_first": 100.0, "q_asr_last": 100.5,
                  "asr_done": 102.0, "asr_bucket": 400.0}))
     gw._on_chunk_ts(protocol.chunk_ts(
         "r-asr-span", 1, 3, 800, [[60, 110]],
-        timings={"q_asr": 1.0, "asr": 999.0,
-                 "q_asr_first": 100.0, "q_asr_last": 101.0,
+        timings={"q_asr_first": 100.0, "q_asr_last": 101.0,
                  "asr_done": 102.0, "asr_bucket": 400.0}))   # 同桶
     gw._on_chunk_ts(protocol.chunk_ts(
         "r-asr-span", 2, 3, 800, [[120, 170]],
-        timings={"q_asr": 1.0, "asr": 999.0,
-                 "q_asr_first": 100.5, "q_asr_last": 103.0,
+        timings={"q_asr_first": 100.5, "q_asr_last": 103.0,
                  "asr_done": 104.5, "asr_bucket": 405.0}))   # 第二桶
     r = fut.result()["timings"]
-    assert r["asr"] == 4000.0    # 104.5-100.5 跨度（非 999×3 求和）
+    assert r["asr"] == 4000.0    # 104.5-100.5 跨度
     assert r["asr_fw"] == 2      # 去重桶数
     assert r["q_asr"] == 3000.0  # 103.0-100.0 排队跨度
     loop.close()
 
 
 def test_q_asr_span_first_enqueue_to_last_claim(gw):
-    """q_asr 新口径：请求所有 chunk 从首个 ASR job 入队到最后一个被认领的
-    墙钟跨度，不是逐 chunk 等待求和。缺 asr_done 戳时 asr 回退算力总和。"""
+    """q_asr 请求级墙钟跨度 = 首个 ASR job 入队 → 最后一个被认领。
+    异常缺 asr_done 戳时 asr 跨度按 0 计。"""
     loop, fut = _fut(gw, "r-span")
     gw._on_chunk_ts(protocol.chunk_ts(
         "r-span", 0, 2, 800, [[0, 50]],
-        timings={"q_asr": 1.0, "asr": 100.0,
-                 "q_asr_first": 100.0, "q_asr_last": 101.0}))
+        timings={"q_asr_first": 100.0, "q_asr_last": 101.0}))
     gw._on_chunk_ts(protocol.chunk_ts(
         "r-span", 1, 2, 800, [[60, 110]],
-        timings={"q_asr": 2.0, "asr": 200.0,
-                 "q_asr_first": 100.2, "q_asr_last": 103.0}))
+        timings={"q_asr_first": 100.2, "q_asr_last": 103.0}))
     assert fut.done()
     assert fut.result()["timings"]["q_asr"] == 3000.0    # 103.0-100.0
-    assert fut.result()["timings"]["asr"] == 300.0       # 缺 done 戳 → 求和兜底
+    assert fut.result()["timings"]["asr"] == 0.0         # 缺 done 戳 → 0
     loop.close()
 
 
-def test_chunk_ts_timings_legacy_absent_zero(gw):
-    """旧消息无 timings → 账本不炸，耗时按 0 计。"""
+def test_chunk_ts_timings_absent_zero(gw):
+    """消息无 timings → 账本不炸，耗时按 0 计。"""
     loop, fut = _fut(gw, "r10")
     gw._on_chunk_ts(protocol.chunk_ts("r10", 0, 1, 800, [[0, 50]]))
     assert fut.result()["timings"] == {"asr": 0.0, "q_asr": 0.0, "asr_fw": 0}

@@ -3,7 +3,7 @@
 单元清单按 FunASR 分词规则从输入文本重建（_tokenize_units），不依赖
 generate 返回的 text 字段——group_timestamp/batch_group_timestamp 回填的
 text 是输入原文（"".join(texts)），不是分词回显（20261116 生产 WARNING
-取证，探针见 scripts/repro/probe_text_format.py）。
+取证，探针脚本见 git 历史）。
 
 分词规则真机实证：中文逐字、ASCII 字母串/数字串整体（FunASR 回显英文
 大写，绑定用 casefold 归一）、标点不产生单元。"""

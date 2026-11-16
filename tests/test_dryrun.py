@@ -159,8 +159,7 @@ def asr_stub(asr_q, gateways):
         time.sleep(0.02)   # asr 墙钟跨度（认领→完成）可测，否则 0.00
         gateways[job["origin"]].put(protocol.chunk_ts(
             job["req_id"], job["idx"], job["need"], piece["samples"],
-            [[0, 50]], timings={"q_asr": 2.0, "asr": 2.0,
-                                "q_asr_first": t_claim, "q_asr_last": t_claim,
+            [[0, 50]], timings={"q_asr_first": t_claim, "q_asr_last": t_claim,
                                 "asr_done": time.time(),
                                 "asr_bucket": t_claim}))
 

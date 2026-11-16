@@ -256,16 +256,14 @@ def test_record_latency_bucket_edges(gw, monkeypatch):
             == pytest.approx(sum(vals) * 1000))
 
 
-def test_worker_snapshot_exports_bounds_and_legacy_view(gw, monkeypatch):
-    """心跳同时带新 bins/bounds 与旧 4 桶视图，滚动升级双向兼容。"""
+def test_worker_snapshot_exports_bounds(gw, monkeypatch):
+    """心跳带新 bins/bounds（档位边界随总预算动态导出，供聚合侧校验）。"""
     bins = [40, 3, 5, 2, 1, 1, 1, 1, 1, 1, 1]
     monkeypatch.setattr(gateway, "_entry_stats", {
         "latency_bins": list(bins), "latency_ms_sum": 1.0})
     stats = gateway._worker_snapshot()["stats"]
     assert stats["latency_bounds"] == [float(b) for b in gateway._LATENCY_BUCKETS]
     assert stats["latency_bins"] == bins
-    assert stats["latency_s"] == {"lt1": 40, "1to5": 8,
-                                  "5to30": 5, "gt30": 4}
 
 
 def _cum_le(d, edge):
@@ -274,48 +272,16 @@ def _cum_le(d, edge):
     return sum(bins[:idx])
 
 
-def test_metrics_legacy_heartbeat_fallback(gw):
-    """旧格式心跳（无 latency_bins）：1/5/30/+Inf 口径仍精确，总数不丢。"""
-    _write_heartbeat(gw._health_dir, "gw-old", {
-        "role": "gateway", "ready": True, "warm": {},
-        "stats": {"requests": 53, "results": 53, "timeouts": 0,
-                  "latency_s": {"lt1": 40, "1to5": 8, "5to30": 2, "gt30": 3},
-                  "latency_ms_sum": 9000.0}})
-    d = gateway._collect()
-    assert d["latency"]["count"] == 53
-    assert _cum_le(d, 1) == 40
-    assert _cum_le(d, 5) == 48
-    assert _cum_le(d, 30) == 50
-
-
-def test_metrics_bounds_mismatch_falls_back(gw):
-    """心跳档位与本地不一致（旧版本/配置漂移）→ 不直接相加 bins，走粗桶回退。"""
+def test_metrics_bounds_mismatch_skipped(gw):
+    """心跳档位与本地不一致（异常心跳/配置漂移）→ 跳过该实例的桶计数，
+    绝不把错误粒度的 bins 直接相加污染直方图。"""
     _write_heartbeat(gw._health_dir, "gw-odd", {
         "role": "gateway", "ready": True, "warm": {},
         "stats": {"latency_bounds": [0.5, 1.0, 2.0, 5.0],
                   "latency_bins": [99, 99, 99, 99, 99],
-                  "latency_s": {"lt1": 10, "1to5": 4, "5to30": 2, "gt30": 1},
                   "latency_ms_sum": 0.0}})
     d = gateway._collect()
-    assert d["latency"]["count"] == 17     # 旧口径，而非 bins 的 495
-
-
-def test_metrics_mixed_gateway_bins(gw):
-    """新旧格式网关混合：总数精确，1/5/30 档位不受旧粒度影响。"""
-    _write_heartbeat(gw._health_dir, "gw-new", {
-        "role": "gateway", "ready": True, "warm": {},
-        "stats": {"latency_bounds": [float(b) for b in gateway._LATENCY_BUCKETS],
-                  "latency_bins": [40, 3, 5, 2, 1, 1, 1, 1, 1, 1, 1],
-                  "latency_ms_sum": 9000.0}})
-    _write_heartbeat(gw._health_dir, "gw-old", {
-        "role": "gateway", "ready": True, "warm": {},
-        "stats": {"latency_s": {"lt1": 10, "1to5": 4, "5to30": 2, "gt30": 1},
-                  "latency_ms_sum": 0.0}})
-    d = gateway._collect()
-    assert d["latency"]["count"] == 74          # 57 + 17
-    assert _cum_le(d, 1) == 50                  # 40 + 10
-    assert _cum_le(d, 5) == 62                  # 48 + (10+4)
-    assert _cum_le(d, 30) == 69                 # 53 + (10+4+2)
+    assert d["latency"]["count"] == 0     # 跳过，而非相加 495
 
 
 if __name__ == "__main__":

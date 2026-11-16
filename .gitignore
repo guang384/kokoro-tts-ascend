@@ -12,7 +12,6 @@ out/
 *.mp3
 *.log
 .pytest_cache/
-ab_out/
 .tmp_*
 .commit-msg.txt
 wheels/*

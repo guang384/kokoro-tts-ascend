@@ -205,12 +205,11 @@ def test_cancel_end_to_end_claim_filter(fakeredis_client, monkeypatch):
     # 1) gateway 断连路径写标记（真实模块函数）
     proc_common.cancel_add("req-gone")
 
-    # 2) 认领侧读取（真实 TtsClaimQueue.is_cancelled → 模块级 ZSCORE）
+    # 2) 认领侧读取（真实 TtsClaimQueue.cancelled_set → 批量 ZSCORE）
     monkeypatch.setattr(proc_common, "_make_redis_client",
                         lambda: fakeredis_client)
     q = proc_common.TtsClaimQueue(16, index=46, name="cancel-e2e")
-    assert q.is_cancelled("req-gone") is True      # WRONGTYPE 在此暴露
-    assert q.is_cancelled("req-alive") is False
+    assert q.cancelled_set(["req-gone", "req-alive"]) == {"req-gone"}   # WRONGTYPE 在此暴露
 
 
 # ── 准入快速拒绝（fast_reject：路径求和预估 + 15% 冗余）──
@@ -289,7 +288,7 @@ def test_timeout_cancels_downstream_chunks(gw):
         asyncio.run(_synth("你好", "zf_001", 1.0, needs_align=False,
                            req_id="rt1"))
     assert ei.value.status_code == 504
-    assert pc.is_cancelled("rt1")
+    assert pc.shared_redis().zscore("kokoro:cancel", "rt1") is not None
     assert gw._entry_stats["timeouts"] == 1
 
 

@@ -203,45 +203,6 @@ class _FlakyRedis:
         return self._inner.eval(*a, **k)
 
 
-def _legacy_member(rid="legacy", ps=30, seq=1234):
-    """旧版 member：2B 音素数 + 20B 序号 + pickle（无精度字节）。"""
-    import pickle
-
-    chunk = _chunk(rid, 0, n=ps)
-    chunk.pop("dtype")
-    return (struct.pack(">H", ps) + f"{seq:020d}".encode()
-            + pickle.dumps(chunk))
-
-
-def test_claim_accepts_legacy_22b_member_offline(fakeredis_client, monkeypatch):
-    """22B 单向兼容：新代码消费旧 member 时显式补 fp32，而不是丢弃。"""
-    import proc_common as pc
-
-    monkeypatch.setattr(pc, "_make_redis_client", lambda: fakeredis_client)
-    q = pc.TtsClaimQueue(64, index=60, name="legacy")
-    fakeredis_client.zadd(q._key, {_legacy_member(): 1234})
-    claimed = q.claim(4, "tts-0-9")
-    assert len(claimed) == 1
-    assert claimed[0][1]["req_id"] == "legacy"
-    assert claimed[0][1]["dtype"] == "fp32"
-    assert q.stats()["bad"] == 0
-    assert q.ack([claimed[0][0]], "tts-0-9") == 1
-
-
-def test_requeue_worker_accepts_legacy_inflight_offline(fakeredis_client, monkeypatch):
-    """旧 worker 认领的 22B member 留在 infl：新代码按旧头解出 seq 回队列。"""
-    import proc_common as pc
-
-    monkeypatch.setattr(pc, "_make_redis_client", lambda: fakeredis_client)
-    q = pc.TtsClaimQueue(64, index=61, name="legacy-infl")
-    legacy = _legacy_member("legacy-infl", seq=4321)
-    fakeredis_client.zadd(f"{q._key}:infl:tts-0-7", {legacy: 1})
-    assert q.requeue_worker("tts-0-7") == 1
-    assert q.depth() == 1 and q.stats()["bad"] == 0
-    claimed = q.claim(4, "tts-0-9")
-    assert len(claimed) == 1 and claimed[0][1]["req_id"] == "legacy-infl"
-
-
 def test_ack_clears_redispatch_counter_offline(fakeredis_client, monkeypatch):
     """ack 成功 = ZREM 成功才 HDEL :ratt；否则慢 worker 晚 ack 会误清。"""
     import proc_common as pc

@@ -2,9 +2,9 @@
 """Kokoro TTS 服务并发压测：找单卡吞吐拐点，决定 GATEWAY_WORKERS/容器副本数。
 
 用法（宿主机装了 httpx，或容器内已自带）:
-    python scripts/benchmark.py --url http://127.0.0.1:8000 -c 1,2,4,8 -n 16
-    python scripts/benchmark.py --url http://127.0.0.1:8000 -c 4 --random 50 --voice zm_001
-    python scripts/benchmark.py --url http://127.0.0.1:8000 -c 4 --text "更长的一段中文……" --voice zm_001
+    python scripts/benchmark.py --url http://127.0.0.1:5174 -c 1,2,4,8 -n 16
+    python scripts/benchmark.py --url http://127.0.0.1:5174 -c 4 --random 50 --voice zm_001
+    python scripts/benchmark.py --url http://127.0.0.1:5174 -c 4 --text "更长的一段中文……" --voice zm_001
 
 指标:
     req/s          每秒完成的请求数
@@ -216,7 +216,7 @@ async def run_level(url: str, conc: int, n: int, texts: list, voice: str, fmt: s
 
 async def main():
     ap = argparse.ArgumentParser(description="Kokoro TTS 并发压测")
-    ap.add_argument("--url", default="http://127.0.0.1:8000")
+    ap.add_argument("--url", default="http://127.0.0.1:5174")
     ap.add_argument("-c", "--concurrency", default="1,2,4,8", help="逗号分隔的并发档位")
     ap.add_argument("-n", "--requests", type=int, default=16, help="每档位总请求数")
     ap.add_argument("--text", default="华为昇腾910B是一颗面向人工智能训练与推理的高性能处理器，"

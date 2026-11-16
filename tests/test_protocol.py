@@ -52,7 +52,6 @@ def test_synth_part_fields_match_consumer():
                                         "text": "你好"}]}
     m = protocol.synth_part("r1", 1, block)
     assert SYNTH_PART_CONSUMER_FIELDS <= set(m)
-    assert m["n"] == 1
     for seg in m["block"]["segs"]:
         assert BLOCK_SEG_FIELDS <= set(seg)
 
@@ -134,14 +133,12 @@ def test_put_result_drop_counter():
     before = protocol.drop_count()
     assert protocol.put_result(_Full(maxsize=1), {"req_id": "r"}, log=None) is False
     assert protocol.drop_count() == before + 1
-    protocol.note_drop()
-    assert protocol.drop_count() == before + 2
 
 
 # ── 阶段耗时随行（/tts 日志分解；全部可选，缺省不落消息）──
 
 def test_timing_fields_optional_not_serialized_by_default():
-    """不传耗时不落消息（旧格式字节级不变，消息键集契约锁死）；传了才带上。"""
+    """不传耗时不落消息（消息键集契约锁死）；传了才带上。"""
     c = protocol.chunk("r1", 0, "ə", "zf_001", 1.0, 0, 1, "你好")
     assert "q_g2p_ms" not in c and "g2p_ms" not in c
     c2 = protocol.chunk("r1", 0, "ə", "zf_001", 1.0, 0, 1, "你好",
@@ -152,14 +149,13 @@ def test_timing_fields_optional_not_serialized_by_default():
                                         "text": "你好"}]}
     assert "timings" not in protocol.synth_part("r1", 1, block)
     sp = protocol.synth_part("r1", 1, block, timings={
-        "q_g2p": 12.5, "g2p": 88.0, "q_tts": 3.0, "tts": 810.0})
-    assert sp["timings"] == {"q_g2p": 12.5, "g2p": 88.0,
-                             "q_tts": 3.0, "tts": 810.0}
+        "q_g2p": 12.5, "g2p": 88.0, "tts_done": 200.0})
+    assert sp["timings"] == {"q_g2p": 12.5, "g2p": 88.0, "tts_done": 200.0}
 
     assert "timings" not in protocol.chunk_ts("r1", 0, 3, 8, [[0, 1]])
     ct = protocol.chunk_ts("r1", 0, 3, 8, [[0, 1]],
-                           timings={"q_asr": 1.0, "asr": 250.0})
-    assert ct["timings"] == {"q_asr": 1.0, "asr": 250.0}
+                           timings={"q_asr_first": 1.0, "asr_done": 2.0})
+    assert ct["timings"] == {"q_asr_first": 1.0, "asr_done": 2.0}
 
 
 def test_make_chunks_propagates_g2p_timings():

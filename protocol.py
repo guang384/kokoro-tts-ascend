@@ -165,17 +165,14 @@ def synth_part(req_id: str, need: int, block: dict,
                timings: dict | None = None) -> dict:
     """tts → gateway_queues[o]。block = {"shm_name", "segs": [{idx, offset,
     samples, text, q_enq?, q_claim?}]}（按句序）；need=该请求 chunk 总数
-    （首段即定，后续一致）；n 为信息性字段（gateway 按 segs 的 idx 集合聚合，
-    不读 n）。q_enq/q_claim 为 chunk 入队/被认领的绝对时刻（秒）——网关对同
+    （首段即定，后续一致）。q_enq/q_claim 为 chunk 入队/被认领的绝对时刻（秒）——网关对同
     请求取 min(入队)/max(认领) 得到请求级 q_tts 墙钟跨度。
-    timings：可选阶段耗时（毫秒）{"q_g2p","g2p","q_tts","tts","tts_done"}；
-    q_tts 旧口径为本批内该请求各 chunk 等待之和（仅旧消息/无 seg 时间戳时
-    兜底），tts 为批时按 chunk 数分摊（求和口径，仅缺戳兜底）；tts_done 为
-    本批前向结束的绝对时刻（秒，批内共享）——网关对同请求取 max、与 seg 的
-    q_claim 的 min 相减得请求级 tts 墙钟跨度；None 不落消息（缺字段消费端
-    按 0 兜底）。"""
+    timings：可选阶段耗时（毫秒）{"q_g2p","g2p","tts_done"}；q_g2p/g2p 整单
+    一次算（网关取 max）；tts_done 为本批前向结束的绝对时刻（秒，批内共享）
+    ——网关对同请求取 max、与 seg 的 q_claim 的 min 相减得请求级 tts 墙钟
+    跨度；None 不落消息（缺字段消费端按 0 兜底）。"""
     msg = {"type": SYNTH_PART, "req_id": req_id, "need": int(need),
-           "n": len(block["segs"]), "block": block}
+           "block": block}
     if timings is not None:
         msg["timings"] = timings
     return msg
@@ -199,13 +196,12 @@ def chunk_ts(req_id: str, idx: int, need: int, samples: int,
     或 error 字符串。need/samples 随行——网关 TS 账本据此在乱序到达下
     收齐拼接（偏移 = 前序 chunk 采样数换算；ASR 与剩余 TTS 重叠执行，
     chunk_ts 可能先于音频聚合完成到达）。
-    timings：可选耗时（毫秒）{"q_asr","asr","q_asr_first","q_asr_last",
-    "asr_done","asr_bucket"}——q_asr/asr 为该 chunk 的队列等待与计算（asr
-    求和口径仅缺戳兜底）；q_asr_first/q_asr_last 为该 ASR job 入队/被认领
-    的绝对时刻（秒），网关据此算请求级 q_asr 墙钟跨度；asr_done 为回投时刻
-    （秒，≈桶推理完成），网关取 max、与 q_asr_last 的 min 相减得请求级 asr
-    墙钟跨度；asr_bucket 为所属推理桶的起始时刻（秒，同桶共享一戳），网关
-    按同请求去重计数 asr_fw（桶数）；None 不落消息（缺字段消费端按 0 兜底）。"""
+    timings：可选跨度戳（秒）{"q_asr_first","q_asr_last","asr_done",
+    "asr_bucket"}——q_asr_first/q_asr_last 为该 ASR job 入队/被认领的绝对
+    时刻，网关据此算请求级 q_asr 墙钟跨度；asr_done 为回投时刻（≈桶推理
+    完成），网关取 max、与 q_asr_last 的 min 相减得请求级 asr 墙钟跨度；
+    asr_bucket 为所属推理桶的起始时刻（同桶共享一戳），网关按同请求去重
+    计数 asr_fw（桶数）；None 不落消息（缺字段消费端按 0 兜底）。"""
     msg = {"type": CHUNK_TS, "req_id": req_id, "idx": int(idx),
            "need": int(need), "samples": int(samples),
            "timestamp": timestamp, "error": error}
@@ -225,18 +221,13 @@ def drop_count() -> int:
     return _DROPS["result"]
 
 
-def note_drop() -> None:
-    """供 put_result 之外的丢弃点登记（如 compute._ack 放弃）。"""
-    _DROPS["result"] += 1
-
-
 def put_result(q, msg: dict, log=None) -> bool:
     """带超时的结果投递：目标入口阻塞（如事件循环卡在编码）时宁可丢这一条
     ——消息级 at-most-once，该请求由入口侧超时兜底，绝不让单个入口的
     阻塞逐级冻结 g2p/tts/asr 全部工人。（注意：worker 死亡导致的在途丢失
     是另一条路径——由 supervisor 的 requeue_worker/sweep 精确重派兜底，
     见 proc_common.TtsClaimQueue。）
-    线程约束：本函数与 note_drop 只在各角色主循环线程调用——_DROPS 的
+    线程约束：本函数只在各角色主循环线程调用——_DROPS 的
     读-改-写在 GIL 下非原子，挪进线程池会静默丢计数（易碎不变量）。"""
     try:
         q.put(msg, timeout=RESULT_PUT_TIMEOUT_S)

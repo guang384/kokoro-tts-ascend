@@ -7,7 +7,7 @@ KModel）；/tts 经 gateway → tts → asr_queue（chunk 级） 往返调用�
 输出: {"text": "你 好 欢 迎...", "timestamp": [[起毫秒, 止毫秒], ...]}（标点已过滤）
 
 模型懒加载单例（双检锁）；group_timestamp 按句分组推理使 ASR 显存
-不随请求总时长增长。批推（timestamp_batch / batch_group_timestamp，
+不随请求总时长增长。批推（batch_group_timestamp，
 生效档由 warmup_batch 实测写入）：多作业展平一次 padded 批前向——
 数值一致性由 _install_batch_safe_predictor 补丁保证（funasr 的
 cnn_blstm 对 padding 不掩码，混合长度批会漂移，补丁逐条分解 predictor
@@ -183,15 +183,6 @@ def _generate_batch(model, audios, texts: list, sample_rate: int, mode: str = No
             f" != {len(audios)}")
     return [{"text": r.get("text", ""), "timestamp": r.get("timestamp", [])}
             for r in res]
-
-
-def timestamp_batch(audios, texts, sample_rate: int = 24000) -> list:
-    """N 组 (波形, 文本) 一次批推理字级时间戳（timestamp 的批版）。
-
-    返回 [{"text", "timestamp"}, ...] 顺序与输入一一对应；数组长度
-    必须相等（同 group_timestamp 的防错位契约）。"""
-    model, _dev = get_model()
-    return _generate_batch(model, audios, texts, sample_rate)
 
 
 def _install_batch_safe_predictor(model) -> bool:
@@ -640,7 +631,7 @@ def _tokenize_units(text: str) -> list:
     """按 FunASR 分词器的实证规则把文本拆成对齐单元。
 
     真机探针实证（20261116，speech_timestamp_prediction-v1，
-    scripts/repro/probe_text_format.py）：
+    探针脚本见 git 历史 scripts/repro/probe_text_format.py）：
         "刷Token调用行为" → 刷 / TOKEN / 调 / 用 / 行 / 为
     即：中文字逐字、ASCII 字母串整体（FunASR 回显大写，绑定比较用
     casefold 归一）、ASCII 数字串整体；标点与其他符号不产生单元。
@@ -672,7 +663,7 @@ def bind_char_timestamps(text: str, ts: list) -> list:
     单元清单按 FunASR 分词规则从**输入文本**重建（_tokenize_units），
     不依赖 generate 返回的 text 字段——group_timestamp/batch_group_timestamp
     回填的 text 是输入原文（"".join(texts)），从来不是分词回显
-    （20261116 生产 WARNING 取证结论，探针见 scripts/repro/probe_text_format.py）。
+    （20261116 生产 WARNING 取证结论，探针脚本见 git 历史）。
 
     text：chunk 原文（含标点）
     ts  ：单元级时间戳 [[起ms, 止ms], ...]（与分词单元按序一一对应）

@@ -1014,12 +1014,6 @@ class TTSCompute:
     def __init__(self, device: str):
         from kokoro import KModel
 
-        stale_dtype = os.getenv("KOKORO_DTYPE", "").strip()
-        if stale_dtype and stale_dtype.lower() != "fp32":
-            # 退役开关的静默失效是部署事故源（"以为开了 fp16"）：明确告警
-            log.warning("KOKORO_DTYPE=%s 已退役（进程级开关）——精度改由请求"
-                        "参数 dtype 控制，本进程按 fp32 权重服务；需要 fp16 "
-                        "请在请求体传 \"dtype\":\"fp16\"", stale_dtype)
         _prime_memory(device)  # 预算硬限+预占先行：连加载期的分配也在预算内
         disable_complex = _resolve_disable_complex(device)
         self.device = device
