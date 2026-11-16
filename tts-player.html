@@ -1,0 +1,1365 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TTS 播放器 / 调试台 · 时间戳逐字轮换</title>
+<style>
+  :root {
+    color-scheme: dark;
+    --bg: #0f1217;
+    --panel: #1c2027;
+    --panel-2: #11141a;
+    --line: #2a2f38;
+    --line-2: #333a45;
+    --text: #d8dee6;
+    --muted: #8b95a3;
+    --accent: #2563eb;
+    --accent-2: #7dd3fc;
+    --warn: #fbbf24;
+    --err: #f87171;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font: 14px/1.6 "Segoe UI", "Microsoft YaHei", "PingFang SC", "Noto Sans CJK SC", sans-serif;
+  }
+  .top { max-width: 1360px; margin: 0 auto; padding: 26px 24px 4px; }
+  h1 { font-size: 20px; margin: 0; font-weight: 600; }
+  h1 small { color: var(--muted); font-weight: normal; font-size: 12.5px; margin-left: 6px; }
+  .hint { color: #7a8592; font-size: 12px; margin: 5px 0 0; max-width: 900px; }
+
+  .layout {
+    max-width: 1360px;
+    margin: 0 auto;
+    padding: 16px 24px 40px;
+    display: grid;
+    grid-template-columns: minmax(360px, .85fr) minmax(480px, 1.15fr);
+    gap: 18px;
+    align-items: start;
+  }
+  @media (max-width: 980px) { .layout { grid-template-columns: 1fr; } }
+
+  .panel {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    padding: 18px;
+  }
+
+  .tabs {
+    display: flex;
+    gap: 6px;
+    background: var(--panel-2);
+    border: 1px solid var(--line);
+    border-radius: 9px;
+    padding: 4px;
+    margin-bottom: 14px;
+  }
+  .tab {
+    flex: 1;
+    background: transparent;
+    border: 0;
+    border-radius: 6px;
+    color: var(--muted);
+    padding: 8px 10px;
+    font: inherit;
+    font-size: 13px;
+    cursor: pointer;
+  }
+  .tab:hover { color: var(--text); }
+  .tab.active { background: var(--accent); color: #fff; }
+
+  .field { margin-top: 12px; }
+  .field:first-child { margin-top: 0; }
+  label { display: block; color: var(--muted); font-size: 12px; margin-bottom: 4px; }
+  input, select, textarea {
+    width: 100%;
+    background: var(--panel-2);
+    color: var(--text);
+    border: 1px solid var(--line-2);
+    border-radius: 7px;
+    padding: 8px 10px;
+    font: inherit;
+    font-size: 13.5px;
+  }
+  input:focus, select:focus, textarea:focus {
+    outline: none;
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px rgba(37, 99, 235, .18);
+  }
+  textarea { min-height: 108px; resize: vertical; line-height: 1.65; }
+  textarea.code {
+    font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+    font-size: 12px;
+    line-height: 1.55;
+  }
+  textarea.dragging { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(37, 99, 235, .2); }
+
+  .input-row { display: flex; gap: 8px; }
+  .input-row input { flex: 1; min-width: 0; }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  @media (max-width: 520px) { .grid2 { grid-template-columns: 1fr; } }
+  .note-field { display: flex; align-items: flex-end; padding-bottom: 6px; }
+
+  .ghost {
+    background: #2a2f38;
+    color: var(--text);
+    border: 1px solid #3a414d;
+    border-radius: 7px;
+    padding: 7px 12px;
+    font: inherit;
+    font-size: 12.5px;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  .ghost:hover { background: #333a45; }
+  .ghost:disabled { opacity: .55; cursor: wait; }
+
+  .primary {
+    width: 100%;
+    margin-top: 16px;
+    background: var(--accent);
+    color: #fff;
+    border: 0;
+    border-radius: 8px;
+    padding: 11px 16px;
+    font: inherit;
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  .primary:hover { background: #1d4ed8; }
+  .primary:disabled { background: #374151; cursor: wait; }
+
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 7px; }
+  .chip {
+    background: var(--panel-2);
+    color: var(--muted);
+    border: 1px solid var(--line-2);
+    border-radius: 999px;
+    padding: 3px 10px;
+    font: inherit;
+    font-size: 11.5px;
+    cursor: pointer;
+  }
+  .chip:hover { color: var(--text); border-color: var(--accent); }
+
+  details.advanced { margin-top: 12px; }
+  details summary { cursor: pointer; color: var(--muted); font-size: 12px; user-select: none; }
+  details summary:hover { color: var(--text); }
+
+  .file-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-top: 9px; }
+  .file-btn {
+    position: relative;
+    overflow: hidden;
+    display: inline-block;
+    background: #2a2f38;
+    border: 1px solid #3a414d;
+    border-radius: 7px;
+    padding: 7px 12px;
+    color: var(--text);
+    font-size: 12.5px;
+    cursor: pointer;
+    margin: 0;
+  }
+  .file-btn:hover { background: #333a45; }
+  .file-btn input {
+    position: absolute;
+    inset: 0;
+    opacity: 0;
+    cursor: pointer;
+    padding: 0;
+  }
+
+  .status {
+    margin-top: 10px;
+    min-height: 18px;
+    color: var(--muted);
+    font-size: 12.5px;
+    word-break: break-word;
+  }
+  .status.err { color: var(--err); }
+
+  /* ── 播放面板 ── */
+  .stage {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    min-height: 250px;
+    padding: 24px 18px 18px;
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    cursor: pointer;
+    overflow: hidden;
+    user-select: none;
+    background:
+      radial-gradient(ellipse 62% 68% at 50% 42%, rgba(37, 99, 235, .22), transparent 70%),
+      linear-gradient(180deg, #131822, #0f1217);
+  }
+  .stage::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    background: radial-gradient(ellipse 46% 46% at 50% 48%, rgba(96, 165, 250, .12), transparent 72%);
+  }
+  .big-char {
+    position: relative;
+    z-index: 1;
+    font-size: clamp(96px, 15vw, 186px);
+    font-weight: 600;
+    line-height: 1.05;
+    color: #e8eef6;
+    text-shadow: 0 0 44px rgba(96, 165, 250, .38);
+    transition: color .18s ease, text-shadow .18s ease, opacity .18s ease;
+    will-change: transform, opacity, filter;
+  }
+  .big-char.long { font-size: clamp(52px, 9vw, 100px); letter-spacing: .02em; }
+  .big-char.dim { color: #5b6673; text-shadow: none; opacity: .72; }
+  .big-char.gap { color: #93a4b8; text-shadow: none; opacity: .86; }
+  @keyframes flipIn {
+    0% { opacity: 0; transform: perspective(620px) rotateX(-82deg) translateY(14px) scale(.92); filter: blur(9px); }
+    60% { opacity: 1; filter: blur(0); }
+    100% { opacity: 1; transform: perspective(620px) rotateX(0) translateY(0) scale(1); filter: blur(0); }
+  }
+  .big-char.flip { animation: flipIn .24s cubic-bezier(.2, .8, .2, 1); }
+  @media (prefers-reduced-motion: reduce) {
+    .big-char.flip { animation: none; }
+    .big-char { transition: none; }
+  }
+  .stage-sub {
+    position: relative;
+    z-index: 1;
+    margin-top: 10px;
+    color: var(--muted);
+    font-size: 12px;
+    text-align: center;
+  }
+
+  .transport { display: flex; align-items: center; flex-wrap: wrap; gap: 9px; margin-top: 14px; }
+  .play {
+    flex: 0 0 auto;
+    width: 46px;
+    height: 46px;
+    border: 0;
+    border-radius: 50%;
+    background: var(--accent);
+    color: #fff;
+    font-size: 16px;
+    line-height: 1;
+    cursor: pointer;
+    display: grid;
+    place-items: center;
+  }
+  .play:hover { background: #1d4ed8; }
+  .mini {
+    flex: 0 0 auto;
+    background: #2a2f38;
+    color: #cbd5e1;
+    border: 1px solid #3a414d;
+    border-radius: 7px;
+    padding: 6px 8px;
+    font: inherit;
+    font-size: 12px;
+    cursor: pointer;
+  }
+  .mini:hover { background: #333a45; }
+  .mini:disabled { opacity: .45; cursor: not-allowed; }
+  #seek { flex: 1 1 120px; min-width: 80px; padding: 0; border: 0; background: transparent; accent-color: var(--accent); }
+  .time { color: #9fb0c4; font-size: 12.5px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .keys { margin-top: 5px; text-align: right; }
+
+  .nowline {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px 18px;
+    margin-top: 10px;
+    color: var(--muted);
+    font-size: 12.5px;
+    font-variant-numeric: tabular-nums;
+  }
+  .nowline b { color: var(--accent-2); font-weight: 600; }
+  .gap-flag {
+    color: var(--warn);
+    border: 1px solid rgba(251, 191, 36, .4);
+    border-radius: 999px;
+    padding: 0 8px;
+    font-size: 11px;
+    line-height: 18px;
+  }
+
+  .meta { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 12px; }
+  .kv {
+    background: var(--panel-2);
+    border: 1px solid var(--line-2);
+    border-radius: 999px;
+    padding: 3px 10px;
+    font-size: 11.5px;
+    color: var(--muted);
+  }
+  .kv b { color: var(--accent-2); font-weight: 600; }
+  .kv.warn { color: var(--warn); border-color: rgba(251, 191, 36, .4); }
+  .kv.warn b { color: var(--warn); }
+
+  .texttitle { margin: 16px 0 6px; color: var(--muted); font-size: 12px; }
+  .textbox {
+    white-space: pre-wrap;
+    word-break: break-word;
+    font-size: 20px;
+    line-height: 2;
+    min-height: 76px;
+    max-height: 220px;
+    overflow: auto;
+    padding: 10px 12px;
+    background: var(--panel-2);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+  }
+  .ch {
+    padding: 1px 2px;
+    border-radius: 4px;
+    cursor: pointer;
+    color: var(--text);
+    transition: color .12s ease, background .12s ease, box-shadow .12s ease;
+  }
+  .ch:hover { background: rgba(96, 165, 250, .18); }
+  .ch.done { color: #59636f; }
+  .ch.now { color: #fff; background: var(--accent); box-shadow: 0 0 14px rgba(37, 99, 235, .65); }
+  .ch.gap { color: #93a4b8; background: rgba(147, 164, 184, .12); box-shadow: none; }
+  .ch.dim { color: #7b8794; }
+  .ch.plain-ch { cursor: default; }
+  .ch.plain-ch:hover { background: transparent; }
+  .plain { color: #aeb8c4; }
+
+  .token-strip {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-top: 8px;
+    max-height: 120px;
+    overflow: auto;
+  }
+  .tokchip {
+    background: var(--panel-2);
+    color: var(--muted);
+    border: 1px solid var(--line-2);
+    border-radius: 6px;
+    padding: 2px 8px;
+    font: inherit;
+    font-size: 11.5px;
+    font-variant-numeric: tabular-nums;
+    cursor: pointer;
+  }
+  .tokchip:hover { border-color: var(--accent); color: var(--text); }
+  .tokchip.done { opacity: .45; }
+  .tokchip.now { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .tokchip.gap { color: #93a4b8; background: rgba(147, 164, 184, .12); }
+  .tokchip.dim { opacity: .75; }
+
+  details.raw { margin-top: 14px; }
+  .debugline {
+    margin-top: 6px;
+    color: var(--muted);
+    font-size: 12.5px;
+    line-height: 1.7;
+    word-break: break-word;
+  }
+  pre {
+    background: var(--panel-2);
+    border: 1px solid var(--line-2);
+    border-radius: 7px;
+    padding: 10px;
+    overflow: auto;
+    max-height: 260px;
+    font-size: 11px;
+    line-height: 1.5;
+  }
+
+  .muted { color: var(--muted); }
+  .small { font-size: 12px; }
+  .hidden { display: none !important; }
+  audio { display: none; }
+</style>
+</head>
+<body>
+
+<header class="top">
+  <h1>TTS 播放器 / 调试台 <small>/tts 时间戳 · /v1 纯音频 · 在线请求 / JSON 回放</small></h1>
+  <p class="hint">支持 /tts（音频 + 字级时间戳）与 /v1/audio/speech（纯音频）；可在线请求，也可直接粘贴 /tts 返回 JSON。timestamp 为毫秒，段数恒等于可对齐字符数（中文字 + 英文字母 + 数字），点击任意字跳转。</p>
+</header>
+
+<main class="layout">
+  <section class="panel">
+    <div class="tabs" role="tablist" aria-label="数据来源">
+      <button type="button" class="tab active" data-tab="online" role="tab" aria-selected="true">在线请求</button>
+      <button type="button" class="tab" data-tab="paste" role="tab" aria-selected="false">直接填入返回 JSON</button>
+    </div>
+
+    <div id="pane-online" class="pane" role="tabpanel">
+      <div class="field">
+        <label for="base">服务地址 base URL</label>
+        <div class="input-row">
+          <input id="base" value="http://127.0.0.1:5174" spellcheck="false" autocomplete="off">
+          <button type="button" class="ghost" id="loadVoices">加载音色</button>
+        </div>
+      </div>
+      <div class="field">
+        <label for="endpoint">端点</label>
+        <select id="endpoint">
+          <option value="tts" selected>/tts（音频 + 字级时间戳）</option>
+          <option value="v1">/v1/audio/speech（纯音频，无时间戳）</option>
+        </select>
+      </div>
+      <div class="grid2">
+        <div class="field">
+          <label for="voice">音色 voice</label>
+          <input id="voice" value="zf_001" list="voicelist" spellcheck="false" autocomplete="off">
+          <datalist id="voicelist"></datalist>
+        </div>
+        <div class="field">
+          <label for="speed">语速 speed（0.5–4.0）</label>
+          <input id="speed" type="number" min="0.5" max="4" step="0.1" value="1.0">
+        </div>
+      </div>
+      <div class="field">
+        <label for="text">文本 text</label>
+        <textarea id="text">你好，欢迎使用昇腾算力平台的语音合成服务。这是一段用于验证文字与时间戳对齐的测试文本。</textarea>
+        <div class="chips">
+          <button type="button" class="chip" data-preset="single">单字</button>
+          <button type="button" class="chip" data-preset="double">双字</button>
+          <button type="button" class="chip" data-preset="short">短句</button>
+          <button type="button" class="chip" data-preset="mixed">中英混合</button>
+          <button type="button" class="chip" data-preset="punct">纯标点</button>
+          <button type="button" class="chip" data-preset="p200">约 200 字</button>
+          <button type="button" class="chip" data-preset="p500">约 500 字</button>
+          <button type="button" class="chip" data-preset="xlong">超长（~1200 字）</button>
+        </div>
+      </div>
+      <details class="advanced">
+        <summary>高级参数</summary>
+        <div class="grid2">
+          <div class="field">
+            <label for="dtype">dtype</label>
+            <select id="dtype">
+              <option value="">默认（服务端）</option>
+              <option value="fp32">fp32</option>
+              <option value="fp16">fp16</option>
+            </select>
+          </div>
+          <div class="field note-field">
+            <span class="muted small">dtype / g2p_overrides 仅本请求生效</span>
+          </div>
+        </div>
+        <div class="field">
+          <label for="ovr">g2p_overrides（JSON，可选）</label>
+          <textarea id="ovr" class="code" placeholder='{"长文本": "chang2 wen2 ben3"}'></textarea>
+        </div>
+      </details>
+      <button type="button" class="primary" id="send">合成并播放</button>
+      <div class="status" id="onlineStatus" role="status" aria-live="polite">填好参数后发请求；/tts 返回音频 + 字级时间戳，/v1 仅返回音频。</div>
+    </div>
+
+    <div id="pane-paste" class="pane hidden" role="tabpanel">
+      <div class="field">
+        <label for="jsonInput">粘贴 /tts 返回的完整 JSON（含 audio_base64）</label>
+        <textarea id="jsonInput" class="code" spellcheck="false"
+          placeholder='{"audio_base64":"UklGRi...","code":0,"duration":3.8,"message":"success","text":"你好","timestamp":[[0,180],[180,360]]}'></textarea>
+      </div>
+      <div class="file-row">
+        <label class="file-btn">选择 .json 文件<input id="file" type="file" accept=".json,application/json"></label>
+        <span class="muted small">也可以把 JSON 文件拖到上面的输入框</span>
+      </div>
+      <button type="button" class="primary" id="parseBtn">解析并载入</button>
+      <div class="status" id="pasteStatus" role="status" aria-live="polite">不会发起网络请求；音频完全在本地解码播放。</div>
+    </div>
+  </section>
+
+  <section class="panel player">
+    <div class="stage" id="stage" title="点击播放 / 暂停">
+      <div class="big-char" id="bigChar">♪</div>
+      <div class="stage-sub" id="stageSub">载入 /tts 响应后开始播放</div>
+    </div>
+
+    <div class="transport">
+      <button type="button" class="play" id="playBtn" aria-label="播放">▶</button>
+      <button type="button" class="mini" id="backBtn" aria-label="后退 1 秒">−1s</button>
+      <button type="button" class="mini" id="fwdBtn" aria-label="前进 1 秒">+1s</button>
+      <input type="range" id="seek" min="0" max="1" value="0" step="10" aria-label="播放进度">
+      <span class="time" id="time">0.00 / 0.00 s</span>
+      <button type="button" class="mini" id="muteBtn" aria-label="静音" aria-pressed="false" title="静音">🔊</button>
+      <button type="button" class="mini" id="dlBtn" aria-label="下载 WAV" title="下载当前音频" disabled>下载</button>
+    </div>
+    <div class="keys muted small">空格 播放/暂停 · ←/→ ±1s · M 静音 · 点击文字或序号跳转</div>
+
+    <div class="nowline">
+      <span>token <b id="tokIdx">—</b></span>
+      <span>时间戳 <b id="tokRange">—</b></span>
+      <span>位置 <b id="posMs">0 ms</b></span>
+      <span class="gap-flag hidden" id="gapFlag">静音间隙</span>
+    </div>
+
+    <div class="meta" id="meta"></div>
+
+    <div class="texttitle">全文（点击任意字跳转）</div>
+    <div class="textbox" id="textBox"><span class="muted">尚无数据</span></div>
+    <div class="token-strip hidden" id="tokenStrip"></div>
+
+    <details class="raw">
+      <summary>请求诊断（端点 / 耗时 / 请求体）</summary>
+      <div class="debugline" id="reqInfo">尚无请求</div>
+      <pre id="reqBody"></pre>
+    </details>
+
+    <details class="raw">
+      <summary>原始响应 JSON（audio_base64 已省略）</summary>
+      <pre id="raw"></pre>
+    </details>
+  </section>
+</main>
+
+<audio id="audio" preload="metadata"></audio>
+
+<script>
+"use strict";
+
+/* ═══════════ 工具 ═══════════ */
+const $ = id => document.getElementById(id);
+const ALIGN_RE = /[\p{Script=Han}0-9a-zA-Z]/u; // 对齐覆盖：中文字 + ASCII 数字/字母（与 /tts timestamp 段数契约同口径）
+const MAX_PASTE_CHARS = 64 * 1024 * 1024;     // 粘贴/拖入 JSON 上限（防超大 base64 冻结标签页）
+const isAlign = ch => ALIGN_RE.test(ch);
+const fmtSec = v => {
+  const n = Number(v);
+  return Number.isFinite(n) ? n.toFixed(2) : "—";
+};
+
+/* ═══════════ 状态 ═══════════ */
+const audio = $("audio");
+// rAF 热路径的 DOM 引用（updateFrame 每帧 7 次 $() → 常量；容器元素静态存在）
+const elSeek = $("seek"), elPosMs = $("posMs"), elTime = $("time"),
+      elTokIdx = $("tokIdx"), elTokRange = $("tokRange"), elGapFlag = $("gapFlag"),
+      elBigChar = $("bigChar"), elTextBox = $("textBox"), elTokenStrip = $("tokenStrip");
+let data = null;            // 最近一次成功解析的响应
+let tokens = [];            // [{ s, e, ch, idx, el }]
+let alignChars = [];        // 原文本中的可对齐字符
+let mode = "none";          // bind | index | none
+let audioUrl = null;
+let raf = null;
+let metaDurationMs = 0;
+let dragging = false;
+let lastIdx = -2;
+let doneWater = 0;          // .done 水位线：tokens[0..doneWater) 已带 done（增量刷）
+let lastActive = null;
+let lastGap = null;
+let metaNoteAdded = false;
+
+/* ═══════════ 解析 ═══════════ */
+function valueText(v) {
+  if (typeof v === "string") return v;
+  try { return JSON.stringify(v); } catch (e) { return String(v); }
+}
+
+function parseResponse(raw) {
+  let d = raw;
+  if (typeof raw === "string") {
+    if (raw.length > MAX_PASTE_CHARS) {
+      throw new Error("响应 JSON 过大（>64MB），请改用在线请求或分段粘贴");
+    }
+    try { d = JSON.parse(raw); }
+    catch (e) { throw new Error("JSON 解析失败：" + e.message); }
+  }
+  if (!d || typeof d !== "object" || Array.isArray(d)) {
+    throw new Error("响应不是 JSON 对象");
+  }
+  if (d.error !== undefined) throw new Error("服务端返回错误：" + valueText(d.error));
+  if (d.detail !== undefined) throw new Error("服务端返回错误：" + valueText(d.detail));
+  if (d.code !== undefined && Number(d.code) !== 0) {
+    throw new Error("服务端返回 code=" + d.code + (d.message ? "：" + d.message : ""));
+  }
+  if (typeof d.audio_base64 !== "string" || !d.audio_base64.trim()) {
+    throw new Error("缺少 audio_base64 字段（请确认贴的是 /tts 的成功响应）");
+  }
+  if (typeof d.text !== "string") throw new Error("缺少 text 字段");
+  if (d.timestamp !== undefined && !Array.isArray(d.timestamp)) {
+    throw new Error("timestamp 字段不是数组");
+  }
+  return d;
+}
+
+function normalizeTs(arr) {
+  const list = [];
+  let bad = 0;
+  for (const pair of arr) {
+    if (!Array.isArray(pair) || pair.length < 2) { bad++; continue; }
+    const rawS = pair[0];
+    const rawE = pair[1];
+    // 只接受 JSON 数字：Number(null)=0 会把坏条目误判成 [0, 0]
+    if (typeof rawS !== "number" || typeof rawE !== "number" ||
+        !Number.isFinite(rawS) || !Number.isFinite(rawE)) { bad++; continue; }
+    const s = Math.max(0, rawS);
+    const e = Math.max(s, rawE);
+    list.push([s, e]);
+  }
+  list.sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+  return { list, bad };
+}
+
+async function decodeAudio(b64) {
+  const clean = String(b64).replace(/\s+/g, "");
+  // 原生解码通道：data: URL → arrayBuffer（C++ base64 解码，免 JS 逐字节
+  // 循环 630 万次 charCodeAt）。base64 非法时 data: 请求失败，归并同一报错
+  let buf;
+  try {
+    buf = await (await fetch("data:application/octet-stream;base64," + clean)).arrayBuffer();
+  } catch (e) {
+    throw new Error("audio_base64 不是合法的 base64（可能被截断）");
+  }
+  const bytes = new Uint8Array(buf);
+  if (bytes.length < 12) throw new Error("audio_base64 解码后数据过短，不是 WAV");
+  const riff = String.fromCharCode(bytes[0], bytes[1], bytes[2], bytes[3]);
+  const wave = String.fromCharCode(bytes[8], bytes[9], bytes[10], bytes[11]);
+  if (riff !== "RIFF" || wave !== "WAVE") {
+    throw new Error("audio_base64 解码后不是 WAV（缺少 RIFF/WAVE 头）");
+  }
+  return bytes;
+}
+
+/* ═══════════ 载入（/tts、/v1、粘贴共用） ═══════════ */
+async function loadResponse(raw) {
+  const d = parseResponse(raw);
+  const { list, bad } = normalizeTs(d.timestamp || []);
+  const bytes = await decodeAudio(d.audio_base64);
+  applyResponse(d, bytes, Math.round(d.audio_base64.length / 1024), list, bad, false);
+}
+
+// d: 响应元数据；bytes: WAV 字节；sizeKB: 音频体大小；
+// list/bad: 归一化后的时间戳/坏条目数；rawWav=true 表示来自 /v1（无 base64/时间戳）
+function applyResponse(d, bytes, sizeKB, list, bad, rawWav) {
+  // 校验全部通过后才替换当前播放内容
+  stopLoop();
+  audio.pause();
+  if (audioUrl) { URL.revokeObjectURL(audioUrl); audioUrl = null; }
+  audio.removeAttribute("src");
+  audio.load();
+
+  data = d;
+  alignChars = Array.from(d.text).filter(isAlign);
+  tokens = (list || []).map(([s, e], i) => ({ s, e, ch: "", idx: i, el: null }));
+  if (tokens.length && alignChars.length === tokens.length) {
+    mode = "bind";
+    tokens.forEach((t, i) => { t.ch = alignChars[i]; });
+  } else if (tokens.length) {
+    mode = "index";
+    // 序号回退模式的展示文字：按时间序映射可对齐文本——
+    // N ≤ 字符数 → 等比例切片；N > 字符数 → 前 total 个各 1 字，
+    // 多出的时间戳（多为尾静音段）保留 #序号。舞台大屏与按钮共用 t.ch。
+    const total = alignChars.length;
+    tokens.forEach((t, i) => {
+      t.ch = "#" + (i + 1);
+      if (tokens.length <= total) {
+        const s0 = Math.floor(total * i / tokens.length);
+        const s1 = Math.max(s0 + 1, Math.floor(total * (i + 1) / tokens.length));
+        t.ch = alignChars.slice(s0, s1).join("") || t.ch;
+      } else if (i < total) {
+        t.ch = alignChars[i] || t.ch;
+      }
+    });
+  } else {
+    mode = "none";
+  }
+
+  metaNoteAdded = false;
+  lastIdx = -2;
+  doneWater = 0;              // 新元素不带 done，水位线归零
+  lastActive = null;
+  lastGap = null;
+
+  renderText(d.text);
+  renderMeta(d, bad || 0, sizeKB, !!rawWav);
+  renderRaw(d, sizeKB, !!rawWav);
+  resetTransport();
+  updateFrame(0, true);
+
+  setStageSub(
+    mode === "bind" ? "已载入 · " + tokens.length + " 个字级时间戳"
+      : mode === "index" ? "已载入 · " + tokens.length + " 个时间戳（序号轮换）"
+      : rawWav ? "纯音频（/v1 无时间戳）" : "该响应无时间戳，仅播放音频"
+  );
+
+  audioUrl = URL.createObjectURL(new Blob([bytes], { type: "audio/wav" }));
+  audio.src = audioUrl;
+  audio.load();
+  $("dlBtn").disabled = false;
+
+  if (window.matchMedia("(max-width: 980px)").matches) {
+    $("stage").scrollIntoView({ behavior: "smooth", block: "start" });
+  }
+
+  const p = audio.play();
+  if (p && typeof p.catch === "function") {
+    p.catch(() => setStageSub("音频就绪 · 点击播放"));
+  }
+}
+
+/* ═══════════ 渲染 ═══════════ */
+function renderText(text) {
+  const box = elTextBox;
+  const strip = elTokenStrip;
+  box.innerHTML = "";
+  strip.innerHTML = "";
+  tokens.forEach(t => { t.el = null; });
+
+  const frag = document.createDocumentFragment();
+  let ai = 0;
+  for (const ch of Array.from(text)) {
+    if (isAlign(ch)) {
+      const span = document.createElement("span");
+      span.className = "ch";
+      span.textContent = ch;
+      if (mode === "bind" && ai < tokens.length) {
+        const i = ai;
+        tokens[i].el = span;
+        span.title = "#" + (i + 1) + "  " + Math.round(tokens[i].s) + "–" +
+                     Math.round(tokens[i].e) + " ms（点击跳转）";
+        // 点击跳转走容器上的事件委托（见底部 init）——长文本 1200+ 个
+        // span 逐个挂 listener 得不偿失
+        span.dataset.i = String(i);
+      } else {
+        span.classList.add("plain-ch");
+      }
+      frag.appendChild(span);
+      ai++;
+    } else if (/\s/.test(ch)) {
+      frag.appendChild(document.createTextNode(ch));
+    } else {
+      const span = document.createElement("span");
+      span.className = "plain";
+      span.textContent = ch;
+      frag.appendChild(span);
+    }
+  }
+  if (!text) frag.appendChild(document.createTextNode("（响应中没有 text 字段）"));
+  box.appendChild(frag);
+
+  if (mode === "index") {
+    strip.classList.remove("hidden");
+    tokens.forEach((t, i) => {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.className = "tokchip";
+      b.textContent = t.ch;   // 展示文字已在 mode 分支统一派生（舞台共用）
+      b.title = "#" + (i + 1) + "  " + Math.round(t.s) + "–" +
+                Math.round(t.e) + " ms（点击跳转）";
+      b.dataset.i = String(i);   // 跳转走 token-strip 的委托（同上）
+      t.el = b;
+      strip.appendChild(b);
+    });
+  } else {
+    strip.classList.add("hidden");
+  }
+}
+
+function renderMeta(d, bad, sizeKB, rawWav) {
+  const box = $("meta");
+  box.innerHTML = "";
+  const add = (label, val, cls) => {
+    const chip = document.createElement("span");
+    chip.className = "kv" + (cls ? " " + cls : "");
+    chip.appendChild(document.createTextNode(label + " "));
+    const b = document.createElement("b");
+    b.textContent = val;
+    chip.appendChild(b);
+    box.appendChild(chip);
+    return chip;
+  };
+
+  const durChip = add("时长", fmtSec(d.duration) + " s");
+  durChip.id = "chipDuration";
+  add("文本", Array.from(d.text).length + " 字");
+  add("时间戳", tokens.length + " 条");
+  if (d.code !== undefined) add("code", String(d.code));
+  if (d.message && d.message !== "success") add("message", String(d.message));
+  add("绑定", mode === "bind" ? "逐字精确" : mode === "index" ? "序号回退" : "无时间戳",
+      mode === "index" ? "warn" : "");
+  if (bad) add("忽略坏条目", String(bad), "warn");
+  add("音频", sizeKB + " KB " + (rawWav ? "WAV" : "base64"));
+  if (mode === "index") {
+    add("可对齐字符", alignChars.length + " 个 ≠ " + tokens.length + " 条时间戳", "warn");
+  }
+}
+
+let rawSeq = 0;             // 载入序号：连续载入时丢弃过期的空闲渲染
+function renderRaw(d, sizeKB, rawWav) {
+  const seq = ++rawSeq;
+  // 大 JSON 的 pretty stringify（3.5MB+）延后到空闲：raw 面板默认收起，
+  // 载入主路径不必付这笔；连续载入时旧回调按序号丢弃
+  const run = () => {
+    if (seq !== rawSeq) return;
+    const view = Object.assign({}, d, {
+      audio_base64: rawWav
+        ? "[已省略，原始 WAV 约 " + sizeKB + " KB]"
+        : "[已省略，原始 base64 约 " + sizeKB + " KB]",
+    });
+    $("raw").textContent = JSON.stringify(view, null, 2);
+  };
+  if (typeof requestIdleCallback === "function") {
+    requestIdleCallback(run, { timeout: 500 });
+  } else {
+    setTimeout(run, 0);
+  }
+}
+
+function resetTransport() {
+  const total = Math.max(0, Number(data && data.duration) || 0) * 1000;
+  metaDurationMs = total;
+  elSeek.max = String(Math.max(1, Math.round(total)));
+  elSeek.value = "0";
+  elTime.textContent = "0.00 / " + (total / 1000).toFixed(2) + " s";
+  elPosMs.textContent = "0 ms";
+  elTokIdx.textContent = tokens.length ? "– / " + tokens.length : "—";
+  elTokRange.textContent = "—";
+  elGapFlag.classList.add("hidden");
+  elBigChar.classList.remove("long", "flip", "dim", "gap");
+  lastIdx = -2;
+  lastActive = null;
+  lastGap = null;
+}
+
+/* ═══════════ 大字符 / 高亮 ═══════════ */
+function setBigChar(ch, animate) {
+  const el = elBigChar;
+  const text = ch || "·";
+  if (el.textContent === text) return;
+  el.textContent = text;
+  el.classList.toggle("long", Array.from(text).length > 1);
+  if (animate) {
+    el.classList.remove("flip");
+    void el.offsetWidth;          // 强制 reflow 以重启动画
+    el.classList.add("flip");
+  }
+}
+
+function scrollTokenIntoView(el) {
+  const box = el.closest(".textbox, .token-strip");
+  if (!box) return;
+  const er = el.getBoundingClientRect();
+  const br = box.getBoundingClientRect();
+  if (er.top < br.top || er.bottom > br.bottom) {
+    box.scrollTop += er.top - br.top - Math.max(0, (br.height - er.height) / 2);
+  }
+}
+
+function locate(ms) {
+  if (!tokens.length) return { idx: -1, active: false, gap: false };
+  let lo = 0, hi = tokens.length - 1, ans = -1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    if (tokens[mid].s <= ms) { ans = mid; lo = mid + 1; }
+    else { hi = mid - 1; }
+  }
+  if (ans < 0) return { idx: 0, active: false, gap: false, before: true };
+  const t = tokens[ans];
+  const next = tokens[ans + 1];
+  const active = ms <= t.e;
+  const gap = !active && !!next && ms < next.s;
+  return { idx: ans, active, gap, after: !next };
+}
+
+function updateFrame(ms, force) {
+  if (!data) return;
+  if (!dragging) {
+    elSeek.value = String(Math.min(Math.max(0, Math.round(ms)), Number(elSeek.max) || 0));
+  }
+  elPosMs.textContent = Math.round(ms) + " ms";
+  elTime.textContent = (ms / 1000).toFixed(2) + " / " + (metaDurationMs / 1000).toFixed(2) + " s";
+
+  if (!tokens.length) {
+    elTokIdx.textContent = "—";
+    elTokRange.textContent = "—";
+    elGapFlag.classList.add("hidden");
+    if (force) {
+      setBigChar("♪", false);
+      elBigChar.classList.remove("dim", "gap");
+    }
+    return;
+  }
+
+  const info = locate(ms);
+  updateTokenUI(info, force);
+  elGapFlag.classList.toggle("hidden", !info.gap);
+}
+
+function updateTokenUI(info, force) {
+  const t = tokens[info.idx];
+  const idxChanged = info.idx !== lastIdx;
+  const big = elBigChar;
+
+  if (idxChanged || force) {
+    const prev = lastIdx;
+    lastIdx = info.idx;
+    if (t) setBigChar(t.ch, idxChanged && !force);
+    big.classList.toggle("dim", !info.active);
+    big.classList.toggle("gap", !!info.gap);
+
+    // 增量刷（原来全量 O(N) 遍历，xlong 1200 token × 播放 tick 会卡）：
+    // .done 用水位线批量补/摘（前进补一段、回退摘一段），当前字单独挂
+    // now/gap/dim——播放 tick O(1)，仅大跨度回退 seek 时付一次差量
+    if (prev !== info.idx) {
+      if (info.idx > doneWater) {
+        for (let k = doneWater; k < info.idx; k++) {
+          const el = tokens[k].el;
+          if (el) el.classList.add("done");
+        }
+        doneWater = info.idx;
+      } else if (info.idx < doneWater) {
+        for (let k = info.idx; k < doneWater; k++) {
+          const el = tokens[k].el;
+          if (el) el.classList.remove("done");
+        }
+        doneWater = info.idx;
+      }
+      if (prev >= 0 && prev < tokens.length) {
+        const pe = tokens[prev].el;
+        if (pe) pe.classList.remove("now", "gap", "dim");
+      }
+    }
+    if (t && t.el) {
+      t.el.classList.remove("done");
+      t.el.classList.toggle("now", info.active);
+      t.el.classList.toggle("gap", !!info.gap);
+      t.el.classList.toggle("dim", !info.active);
+    }
+    elTokIdx.textContent = (info.idx + 1) + " / " + tokens.length;
+    elTokRange.textContent = "[" + Math.round(t.s) + ", " + Math.round(t.e) + "] ms";
+    if (info.active && t && t.el) scrollTokenIntoView(t.el);
+  } else if (info.active !== lastActive || info.gap !== lastGap) {
+    if (t && t.el) {
+      t.el.classList.toggle("now", info.active);
+      t.el.classList.toggle("gap", info.gap);
+      t.el.classList.toggle("dim", !info.active);
+    }
+    big.classList.toggle("dim", !info.active);
+    big.classList.toggle("gap", !!info.gap);
+    if (info.active && t && t.el) scrollTokenIntoView(t.el);
+  }
+
+  lastActive = info.active;
+  lastGap = info.gap;
+}
+
+/* ═══════════ 播放控制 ═══════════ */
+function setStageSub(text) { $("stageSub").textContent = text; }
+function setPlayIcon(playing) {
+  $("playBtn").textContent = playing ? "⏸" : "▶";
+  $("playBtn").setAttribute("aria-label", playing ? "暂停" : "播放");
+}
+
+function startLoop() {
+  if (raf) return;
+  const step = () => {
+    raf = requestAnimationFrame(step);
+    if (!audio.paused) updateFrame(audio.currentTime * 1000);
+  };
+  raf = requestAnimationFrame(step);
+}
+function stopLoop() {
+  if (raf) { cancelAnimationFrame(raf); raf = null; }
+}
+
+function togglePlay() {
+  if (!audio.src) { setStageSub("先载入 /tts 响应或发一次请求"); return; }
+  if (audio.paused) {
+    const p = audio.play();
+    if (p && typeof p.catch === "function") {
+      p.catch(e => setStageSub("播放失败：" + e.message));
+    }
+  } else {
+    audio.pause();
+  }
+}
+
+function seekToToken(i) {
+  const t = tokens[i];
+  if (!data || !t) return;
+  try {
+    audio.currentTime = t.s / 1000;
+  } catch (e) {
+    audio.addEventListener("loadedmetadata", () => {
+      try { audio.currentTime = t.s / 1000; } catch (e2) { /* ignore */ }
+    }, { once: true });
+  }
+  updateFrame(t.s, true);
+  const p = audio.play();
+  if (p && typeof p.catch === "function") p.catch(() => { /* 自动播放被拦截时保持暂停 */ });
+}
+
+function seekBy(dms) {
+  if (!data) return;
+  const total = Number.isFinite(audio.duration) ? audio.duration * 1000 : metaDurationMs;
+  const next = Math.max(0, Math.min(audio.currentTime * 1000 + dms, total));
+  try { audio.currentTime = next / 1000; } catch (e) { /* ignore */ }
+  updateFrame(next, true);
+}
+
+audio.addEventListener("play", () => {
+  setPlayIcon(true);
+  startLoop();
+  if (data) setStageSub(mode === "none" ? "播放中（无时间戳）" : "播放中 · 空格暂停");
+});
+audio.addEventListener("pause", () => {
+  setPlayIcon(false);
+  stopLoop();
+  if (data && !audio.ended) {
+    setStageSub("已暂停 · 空格继续");
+    updateFrame(audio.currentTime * 1000, true);
+  }
+});
+audio.addEventListener("ended", () => {
+  setPlayIcon(false);
+  stopLoop();
+  if (!data) return;
+  const endMs = Number.isFinite(audio.duration) ? audio.duration * 1000 : metaDurationMs;
+  updateFrame(endMs, true);
+  setStageSub("播放结束");
+});
+audio.addEventListener("timeupdate", () => {
+  if (data && audio.paused) updateFrame(audio.currentTime * 1000, true);
+});
+audio.addEventListener("seeked", () => {
+  if (data) updateFrame(audio.currentTime * 1000, true);
+});
+audio.addEventListener("loadedmetadata", () => {
+  if (!data) return;
+  const actual = Number.isFinite(audio.duration) && audio.duration > 0
+    ? audio.duration * 1000 : metaDurationMs;
+  metaDurationMs = actual;
+  elSeek.max = String(Math.max(1, Math.round(actual)));
+  const durChip = document.getElementById("chipDuration");
+  if (durChip) {
+    const b = durChip.querySelector("b");
+    if (b) b.textContent = (actual / 1000).toFixed(2) + " s";
+  }
+  const expect = (Number(data.duration) || 0) * 1000;
+  if (!metaNoteAdded && expect > 0 && Math.abs(expect - actual) > 80) {
+    metaNoteAdded = true;
+    const chip = document.createElement("span");
+    chip.className = "kv warn";
+    chip.textContent = "音频实际 " + (actual / 1000).toFixed(2) +
+                       " s ≠ JSON " + (expect / 1000).toFixed(2) + " s";
+    $("meta").appendChild(chip);
+  }
+  updateFrame(audio.currentTime * 1000, true);
+});
+audio.addEventListener("error", () => {
+  if (!audio.src) return;
+  setStageSub("音频无法播放（WAV 数据可能损坏）");
+});
+
+/* ═══════════ 输入区交互 ═══════════ */
+// 标签页
+document.querySelectorAll(".tab").forEach(btn => {
+  btn.addEventListener("click", () => {
+    document.querySelectorAll(".tab").forEach(b => {
+      const on = b === btn;
+      b.classList.toggle("active", on);
+      b.setAttribute("aria-selected", on ? "true" : "false");
+    });
+    const online = btn.dataset.tab === "online";
+    $("pane-online").classList.toggle("hidden", !online);
+    $("pane-paste").classList.toggle("hidden", online);
+  });
+});
+
+// 文本样例（保留 lab 的边界集合：单字/双字/纯标点/约 200/500/1200 字）
+const PRESET_SENTENCE = "语音合成服务的质量验证需要覆盖不同长度的文本输入，从单个字符到数百字的段落都应该稳定输出。";
+const PRESETS = {
+  single: "好",
+  double: "你好",
+  short: "这是一个短句测试。",
+  mixed: "Hello world，你好世界！这是中英混合文本，英文单词也会逐字母对齐。",
+  punct: "！！！……，。？；：",
+  p200: PRESET_SENTENCE.repeat(5),
+  p500: PRESET_SENTENCE.repeat(11),
+  xlong: PRESET_SENTENCE.repeat(27),
+};
+document.querySelectorAll("[data-preset]").forEach(btn => {
+  btn.addEventListener("click", () => {
+    const v = PRESETS[btn.dataset.preset];
+    if (v) { $("text").value = v; $("text").focus(); }
+  });
+});
+
+// 偏好持久化
+const PREF_KEY = "tts-player-prefs-v1";
+try {
+  const p = JSON.parse(localStorage.getItem(PREF_KEY) || "{}");
+  if (p.base) $("base").value = p.base;
+  if (p.voice) $("voice").value = p.voice;
+  if (p.speed) $("speed").value = p.speed;
+  if (p.endpoint) $("endpoint").value = p.endpoint;
+} catch (e) { /* localStorage 不可用时忽略 */ }
+function savePrefs() {
+  try {
+    localStorage.setItem(PREF_KEY, JSON.stringify({
+      base: $("base").value.trim(),
+      voice: $("voice").value.trim(),
+      speed: $("speed").value,
+      endpoint: $("endpoint").value,
+    }));
+  } catch (e) { /* ignore */ }
+}
+
+function setStatus(id, msg, isErr) {
+  const el = $(id);
+  el.textContent = msg;
+  el.classList.toggle("err", !!isErr);
+}
+function setRequestDebug(info, body) {
+  $("reqInfo").textContent = info;
+  $("reqBody").textContent = body || "";
+}
+function baseUrl() {
+  return $("base").value.trim().replace(/\/+$/, "");
+}
+function httpErrorText(status, body) {
+  let msg = (body || "").trim().slice(0, 400);
+  try {
+    const j = JSON.parse(body);
+    if (j && j.error !== undefined) msg = valueText(j.error);
+    else if (j && j.detail !== undefined) msg = valueText(j.detail);
+  } catch (e) { /* 非 JSON 错误体 */ }
+  const hint = status === 429 ? "服务繁忙，请稍后重试"
+    : status === 503 ? "时间戳服务未就绪"
+    : status === 504 ? "推理或对齐超时"
+    : "";
+  return "HTTP " + status + (hint ? "（" + hint + "）" : "") + "：" + (msg || "无响应体");
+}
+function netHint(e) {
+  return e instanceof TypeError ? "（网络或 CORS 失败：请检查服务地址与服务状态）" : "";
+}
+
+// 加载音色
+$("loadVoices").addEventListener("click", async () => {
+  const btn = $("loadVoices");
+  const base = baseUrl();
+  if (!base && location.protocol === "file:") {
+    setStatus("onlineStatus", "当前以 file:// 打开，请先填写服务地址", true);
+    return;
+  }
+  btn.disabled = true;
+  setStatus("onlineStatus", "加载音色…");
+  try {
+    const resp = await fetch(base + "/v1/voices");
+    if (!resp.ok) throw new Error("HTTP " + resp.status);
+    const d = await resp.json();
+    const list = Array.isArray(d.voices) ? d.voices : [];
+    const dl = $("voicelist");
+    dl.innerHTML = "";
+    for (const v of list) {
+      const o = document.createElement("option");
+      o.value = v;
+      dl.appendChild(o);
+    }
+    setStatus("onlineStatus", "已加载 " + list.length + " 个音色（输入框可下拉选择）");
+    savePrefs();
+  } catch (e) {
+    setStatus("onlineStatus", "音色加载失败：" + e.message + netHint(e) + "（可直接手填音色）", true);
+  } finally {
+    btn.disabled = false;
+  }
+});
+
+// 在线请求
+$("send").addEventListener("click", async () => {
+  const btn = $("send");
+  const base = baseUrl();
+  if (!base && location.protocol === "file:") {
+    setStatus("onlineStatus", "当前以 file:// 打开，请先填写服务地址", true);
+    return;
+  }
+  const text = $("text").value;
+  if (!text.trim()) { setStatus("onlineStatus", "请填写文本 text", true); return; }
+  const speed = Number($("speed").value);
+  if (!Number.isFinite(speed) || speed <= 0 || speed > 4) {
+    setStatus("onlineStatus", "speed 需在 0–4 之间（服务端会把 <0.5 钳制到 0.5，>4 返回 422）", true);
+    return;
+  }
+  let ovr = null;
+  const ovrText = $("ovr").value.trim();
+  if (ovrText) {
+    try { ovr = JSON.parse(ovrText); }
+    catch (e) {
+      setStatus("onlineStatus", "g2p_overrides 不是合法 JSON：" + e.message, true);
+      return;
+    }
+  }
+
+  const endpoint = $("endpoint").value;   // tts | v1
+  const payload = endpoint === "tts"
+    ? { text, speed }
+    : { model: "kokoro-v1.1-zh", input: text, response_format: "wav", speed };
+  const voice = $("voice").value.trim();
+  if (voice) payload.voice = voice;
+  if (ovr) payload.g2p_overrides = ovr;
+  const dtype = $("dtype").value;
+  if (dtype) payload.dtype = dtype;
+
+  btn.disabled = true;
+  setStatus("onlineStatus", endpoint === "tts"
+    ? "请求中…（/tts 需合成 + 对齐，长文本可能较慢）"
+    : "请求中…（/v1 纯音频，无时间戳）");
+  setRequestDebug("端点 " + endpoint + " · 请求中…", JSON.stringify(payload, null, 2));
+  const t0 = performance.now();
+  try {
+    const resp = await fetch(base + (endpoint === "tts" ? "/tts" : "/v1/audio/speech"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const elapsed = performance.now() - t0;
+    if (!resp.ok) throw new Error(httpErrorText(resp.status, await resp.text()));
+    if (endpoint === "tts") {
+      await loadResponse(await resp.text());
+    } else {
+      // /v1 只返回裸 WAV：构造一个无时间戳的响应，走同一套播放管线
+      const bytes = new Uint8Array(await resp.arrayBuffer());
+      const d = { code: 0, message: "success", text, g2p: text, timestamp: [] };
+      applyResponse(d, bytes, Math.round(bytes.length / 1024), [], 0, true);
+    }
+    savePrefs();
+    setStatus("onlineStatus", "请求成功 · " + (elapsed / 1000).toFixed(2) + " s · HTTP " +
+      resp.status + (endpoint === "v1" ? " · 纯音频（无时间戳）" : ""));
+    setRequestDebug(
+      "端点 " + endpoint + " · HTTP " + resp.status + " · 耗时 " + (elapsed / 1000).toFixed(2) +
+        " s · 文本 " + text.length + " 字" + (voice ? " · 音色 " + voice : "") +
+        " · 语速 " + speed + (endpoint === "v1" ? " · 纯音频" : ""),
+      JSON.stringify(payload, null, 2));
+  } catch (e) {
+    setStatus("onlineStatus", "请求失败：" + e.message + netHint(e), true);
+    setRequestDebug("端点 " + endpoint + " · 失败 · " + e.message, JSON.stringify(payload, null, 2));
+  } finally {
+    btn.disabled = false;
+  }
+});
+
+// 粘贴 / 文件载入
+$("parseBtn").addEventListener("click", async () => {
+  const raw = $("jsonInput").value.trim();
+  if (!raw) { setStatus("pasteStatus", "请先粘贴 /tts 返回的 JSON", true); return; }
+  try {
+    await loadResponse(raw);
+    setStatus("pasteStatus", "已解析并载入");
+    setRequestDebug("离线解析（粘贴 JSON）· 未发起网络请求", "");
+  } catch (e) {
+    setStatus("pasteStatus", "解析失败：" + e.message, true);
+  }
+});
+
+async function loadFile(file) {
+  if (!file) return;
+  try {
+    const txt = await file.text();
+    $("jsonInput").value = txt;
+    await loadResponse(txt);
+    setStatus("pasteStatus", "已载入文件 " + file.name);
+    setRequestDebug("离线解析（文件 " + file.name + "）· 未发起网络请求", "");
+  } catch (e) {
+    setStatus("pasteStatus", "文件读取失败：" + e.message, true);
+  }
+}
+$("file").addEventListener("change", e => loadFile(e.target.files && e.target.files[0]));
+
+const dropZone = $("jsonInput");
+["dragenter", "dragover"].forEach(ev => {
+  dropZone.addEventListener(ev, e => {
+    e.preventDefault();
+    dropZone.classList.add("dragging");
+  });
+});
+["dragleave", "drop"].forEach(ev => {
+  dropZone.addEventListener(ev, e => {
+    e.preventDefault();
+    dropZone.classList.remove("dragging");
+  });
+});
+dropZone.addEventListener("drop", e => {
+  const f = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
+  loadFile(f);
+});
+
+// 播放器按钮
+$("playBtn").addEventListener("click", togglePlay);
+$("stage").addEventListener("click", togglePlay);
+$("backBtn").addEventListener("click", () => seekBy(-1000));
+$("fwdBtn").addEventListener("click", () => seekBy(1000));
+
+// 点字跳转（事件委托：renderText 只标 dataset.i，不逐字挂 listener）
+elTextBox.addEventListener("click", e => {
+  const t = e.target.closest(".ch[data-i]");
+  if (t) seekToToken(Number(t.dataset.i));
+});
+elTokenStrip.addEventListener("click", e => {
+  const t = e.target.closest(".tokchip[data-i]");
+  if (t) seekToToken(Number(t.dataset.i));
+});
+
+// 静音 / 下载
+function setMuteIcon() {
+  const btn = $("muteBtn");
+  const muted = audio.muted;
+  btn.textContent = muted ? "🔇" : "🔊";
+  btn.setAttribute("aria-label", muted ? "取消静音" : "静音");
+  btn.setAttribute("aria-pressed", muted ? "true" : "false");
+}
+$("muteBtn").addEventListener("click", () => { audio.muted = !audio.muted; });
+audio.addEventListener("volumechange", setMuteIcon);
+setMuteIcon();
+
+$("dlBtn").addEventListener("click", () => {
+  if (!audioUrl) { setStageSub("先载入音频再下载"); return; }
+  const stem = ((data && data.text) || "tts").slice(0, 12).replace(/[\\/:*?"<>|\s]+/g, "_");
+  const a = document.createElement("a");
+  a.href = audioUrl;
+  a.download = (stem || "tts") + ".wav";
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+});
+
+const seek = elSeek;
+seek.addEventListener("pointerdown", () => { dragging = true; });
+seek.addEventListener("input", () => {
+  dragging = true;
+  const ms = Number(seek.value) || 0;
+  updateFrame(ms, true);
+  try {
+    const cap = Number.isFinite(audio.duration) ? audio.duration : ms / 1000;
+    audio.currentTime = Math.min(ms / 1000, cap);
+  } catch (e) { /* metadata 未就绪时忽略 */ }
+});
+seek.addEventListener("change", () => {
+  dragging = false;
+  const ms = Number(seek.value) || 0;
+  try { audio.currentTime = ms / 1000; } catch (e) { /* ignore */ }
+  updateFrame(Number.isFinite(audio.duration) ? audio.currentTime * 1000 : ms, true);
+});
+seek.addEventListener("blur", () => { dragging = false; });
+
+// 键盘
+document.addEventListener("keydown", e => {
+  const el = e.target;
+  const tag = (el && el.tagName || "").toUpperCase();
+  if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" ||
+      tag === "BUTTON" || (el && el.isContentEditable)) return;
+  if (e.code === "Space") { e.preventDefault(); togglePlay(); }
+  else if (e.code === "ArrowLeft") { e.preventDefault(); seekBy(-1000); }
+  else if (e.code === "ArrowRight") { e.preventDefault(); seekBy(1000); }
+  else if (e.code === "KeyM") { e.preventDefault(); audio.muted = !audio.muted; }
+});
+</script>
+</body>
+</html>

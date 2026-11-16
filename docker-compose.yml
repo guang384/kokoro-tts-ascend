@@ -1,0 +1,52 @@
+# 多容器单卡共享模式（可选）：nginx 最少连接负载均衡 -> N 个 api 容器共享 /dev/davinci0
+# 用法: docker compose up -d --build --scale api=4
+# 扩容后需重启 nginx 让其重新解析 DNS: docker compose restart nginx
+# 若宿主机安装了 ascend-docker-runtime，可删除 devices/volumes 段，改用:
+#   runtime: ascend
+#   environment: [ ASCEND_VISIBLE_DEVICES=0 ]
+services:
+  api:
+    # 版本号 = 日期（如 20261104）：IMAGE_TAG=$(date +%Y%m%d) docker compose up -d --build
+    # 不指定 IMAGE_TAG 时用已有镜像/构建出 latest
+    image: kokoro-tts-ascend:${IMAGE_TAG:-latest}
+    build:
+      context: .
+      args:
+        IMAGE_VERSION: ${IMAGE_TAG:-latest}
+    environment:
+      # WEB_CONCURRENCY 无效已删：网关进程拓扑由 supervisor 编排（GATEWAY_WORKERS），
+      # 与 uvicorn 内建多 worker 无关，留着只会误导调参
+      - ASCEND_DEVICE_ID=${ASCEND_DEVICE_ID:-0}
+      - KOKORO_VOICE=${KOKORO_VOICE:-zf_001}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+    devices:
+      - /dev/davinci0
+      - /dev/davinci_manager
+      - /dev/devmm_svm
+      - /dev/hisi_hdc
+    volumes:
+      - /usr/local/Ascend/driver:/usr/local/Ascend/driver:ro
+      - /usr/local/dcmi:/usr/local/dcmi:ro
+      - /usr/local/bin/npu-smi:/usr/local/bin/npu-smi
+    shm_size: "2g"
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "3"
+    restart: unless-stopped
+    networks: [kokoro]
+
+  nginx:
+    image: nginx:1.27-alpine
+    ports:
+      - "${PORT:-5174}:8000"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on: [api]
+    restart: unless-stopped
+    networks: [kokoro]
+
+networks:
+  kokoro:
+    driver: bridge

@@ -1,0 +1,26 @@
+# 本地开发/压测参考（真机部署由 Dockerfile 统一安装，两边版本保持一致）。
+# torch 与 torch_npu 不在此处安装——
+# 由华为官方基础镜像 ascendhub/torch-npu:2.14.0-cann9.2.0-910b-ubuntu22.04-py3.12 提供。
+fastapi>=0.110
+uvicorn[standard]>=0.27
+kokoro==0.9.4
+misaki[zh]==0.9.4
+# pypinyin 是 misaki 的传递依赖；本工程依赖其内部结构做请求级多音字覆盖
+# （PHRASES_DICT / core.seg / mmseg），锁定到已验证版本，勿随意升级
+pypinyin==0.55.0
+soundfile>=0.12
+numpy>=1.26
+huggingface_hub>=0.23
+httpx>=0.27
+phonemizer
+espeakng-loader
+# funasr 固定 1.4.21：批推数值安全补丁依赖其内部结构
+# （AutoModel.model.predictor / get_upsample_timestamp 签名 / mask 形状 /
+# OmegaConf frontend_conf 合并）。升级前必须重跑 tests/validate_asr_batch.py，
+# 并确认 funasr_ts._batch_patch 仍为 ok（否则自动降回单条路径）。
+funasr==1.4.21
+kaldi-native-fbank
+# pytest 已入镜像（供容器内离线回归）；torch/torch_npu 来自基础镜像，en_core_web_sm 由 Dockerfile 以 wheel 安装
+prometheus-client>=0.20
+redis>=5
+fakeredis[lua]  # 仅测试：Windows 无 redis-server，单测注入 fakeredis；[lua] 供 claim/ack EVAL

@@ -1,0 +1,89 @@
+# kokoro-tts K8s 部署（HAMi vNPU 显存切分 32G）
+#
+# 前置：集群已装 HAMi（schedulerName: hami-scheduler 全局调度器 +
+# huawei Ascend device plugin）。部署前核对资源名：
+#   kubectl describe node <node> | grep -i ascend
+# （huawei.com/Ascend910B / Ascend910BMemory 随 HAMi 版本与芯片系列变化）
+#
+# 显存预算（32G vNPU）：TTS_WORKERS × ~5.5GB（B=4）+ ASR_WORKERS × ~1.8GB
+# （B=2，公式见 pipeline._asr_auto_budget_mb）+ 运行时 ~2GB ≈ 29.7GB，余
+# ~2.3GB（ASR_WORKERS 曾配 4——新公式下 4×1.8GB 后仅剩 0.8GB 余量，溢出
+# 风险不可接受，故钉 3；3×B2=6u 仍 ≥0.3×16u 的 asr 配比底线）；
+# 单副本独占一张 vNPU，加副本 = 加卡。注意 64GB 裸卡镜像默认（TTS 4×B8 +
+# ASR 4×B8 ≈ 55GB）不适用本文件——vNPU 场景全部显式钉值。
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kokoro-tts
+  labels: {app: kokoro-tts}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: kokoro-tts}
+  template:
+    metadata:
+      labels: {app: kokoro-tts}
+    spec:
+      schedulerName: hami-scheduler   # HAMi 全局调度器（vNPU 装箱必须，非 default）
+      # supervisor 关闭最坏 ~77s（逐子进程 terminate/join 5s + kill 2s）；
+      # 默认 30s 会在收尾前 SIGKILL，截断在途响应并留下孤儿 NPU 上下文。
+      terminationGracePeriodSeconds: 90
+      containers:
+        - name: kokoro
+          image: kokoro-tts-ascend:20261111-fix24
+          ports:
+            - containerPort: 5174
+          env:
+            - name: PORT
+              value: "5174"
+            - name: LOG_LEVEL
+              value: "INFO"
+            # 32G vNPU 配比（预算公式见文件头注释）
+            - name: TTS_WORKERS
+              value: "4"
+            - name: ASR_WORKERS
+              value: "3"
+            - name: TTS_MAX_BATCH_SIZE
+              value: "4"
+            - name: ASR_MAX_BATCH_SIZE
+              value: "2"
+            # 不设 DEVICE/ASCEND_DEVICE_ID：设备探测自动发现（显式值 →
+            # torch 枚举(pid 打散，多卡分摊) → npu-smi 驱动层卡号兜底，
+            # vNPU 场景已覆盖）；HAMi 注入 ASCEND_VISIBLE_DEVICES 等池化变量
+          resources:
+            limits:
+              huawei.com/Ascend910B: 1          # 资源名以 describe node 为准
+              huawei.com/Ascend910BMemory: 32   # HAMi vNPU 显存切分（GiB）
+              cpu: "8"
+              memory: 16Gi                      # 含 /dev/shm tmpfs 账目
+          volumeMounts:
+            - {name: shm, mountPath: /dev/shm}
+          startupProbe:              # 串行启动 + NPU 预热宽限 15 分钟
+            httpGet: {path: /health, port: 5174}
+            failureThreshold: 90
+            periodSeconds: 10
+            timeoutSeconds: 5
+          readinessProbe:
+            httpGet: {path: /health, port: 5174}
+            periodSeconds: 5
+            timeoutSeconds: 5
+          livenessProbe:             # 长故障才重启（覆盖 worker 重生 1-2 分钟瞬态）
+            httpGet: {path: /health, port: 5174}
+            failureThreshold: 36
+            periodSeconds: 10
+            timeoutSeconds: 5
+      volumes:
+        - name: shm
+          emptyDir:
+            medium: Memory           # 等价 docker --shm-size；写满 = SIGBUS
+            sizeLimit: 2Gi           # 长文本大并发可提 4Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kokoro-tts
+spec:
+  selector: {app: kokoro-tts}
+  ports:
+    - port: 5174
+      targetPort: 5174
