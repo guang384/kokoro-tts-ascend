@@ -6,27 +6,112 @@ Kokoro TTS（`hexgrad/Kokoro-82M-v1.1-zh`，103 中文音色 + 中英混合）�
 - `POST /v1/audio/speech` —— OpenAI 兼容，音频流（纯 TTS）
 - `POST /tts` —— 业务接口：`audio_base64` + FunASR 字级时间戳
 
+## 架构
+
+### 进程拓扑
+
+```mermaid
+flowchart LR
+  client([客户端]) --> nginx["nginx · least_conn<br/>（多副本可选，单副本可直连）"]
+  nginx --> gw
+
+  subgraph box["容器 · supervisor 父进程编排（重生 / 看门狗 / 排空）"]
+    gw["gateway ×E<br/>校验 · 受理闸门 · 聚合 · 编码"]
+    g2p["g2p ×G<br/>切句 / G2P"]
+    tts["tts ×T<br/>批量前向 · 跨请求混批"]
+    asr["asr ×S<br/>FunASR 字级对齐"]
+    subgraph q["内嵌 redis-server（unix socket · 纯内存）"]
+      q1[("g2p 队列")]
+      q2[("tts 认领队列")]
+      q3[("asr 队列")]
+      q4[("gateway 结果邮箱")]
+    end
+    shm[("/dev/shm<br/>PCM16 音频块")]
+  end
+
+  gw -->|整单入队| q1
+  q1 -->|pull 拉取| g2p
+  g2p -->|chunk 音素| q2
+  q2 -->|认领组批 ≤B| tts
+  tts -->|写块| shm
+  tts -->|synth_part| q4
+  tts -->|asr job（chunk 级）| q3
+  q3 -->|pull 拉取| asr
+  asr -->|读音频块| shm
+  asr -->|chunk_ts| q4
+  q4 -->|收齐 need 块| gw
+  gw -->|HTTP 响应| client
+```
+
 Actor 流水线：进程即 Actor、队列即 Mailbox、全部有界——下游满 → 上游阻塞 → 更上游拒单（429）。
 Mailbox 走 Redis 队列（supervisor 子进程托管的 redis-server，unix socket、纯内存）：
 **pull 模式**——worker 空闲即取（LPOP 轮询，无预分配无队头阻塞）；消息常驻服务端，
 队列内消息零丢失（已认领未 ack 的由 supervisor 按 worker 死亡精确重派，秒级；
-TTL 只兜漏检极端）。depth = LLEN/ZCARD = 真实等待数。redis-server 死亡 → supervisor
-自动重启（队列重置，在途请求走超时兜底）；端到端假死判死（WEDGE_RESTART_S）为最终兜底。
+TTL 只兜漏检极端）。depth = LLEN/ZCARD = 真实等待数。gateway 进程间以 SO_REUSEPORT
+均匀分接连接。设计要点：聚合在网关（compute 无状态可混批）；`protocol.py` 为消息契约
+单一事实来源。
 
-```
-HTTP → gateway（校验/整单入队，满则 429）
-  → g2p 池（切句/G2P，请求级 g2p_overrides）
-  → tts 认领队列（worker 按队列快照组批 ≤MAX_BATCH + 音素长度类宽）
-  → tts 池（批量前向 → 每请求一块 PCM16 SHM → synth_part 直投网关）
-  → gateway 按 req_id 聚合：/v1 直接编码返回
-                           /tts → chunk 级对齐（tts 前向后即派 asr job）
-                                  → asr 池（FunASR）→ chunk_ts → TS 账本拼装
+### 请求时序（/tts）
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant C as 客户端
+  participant GW as gateway
+  participant G2P as g2p 池
+  participant TTS as tts 池
+  participant ASR as asr 池
+
+  C->>GW: POST /tts
+  GW->>GW: 校验 · 受理闸门（满则 429）
+  GW->>G2P: 整单入 g2p 队列
+  G2P->>G2P: 切句 / G2P（g2p_overrides）
+  G2P->>TTS: chunk 音素入认领队列
+  TTS->>TTS: 认领组批（≤MAX_BATCH · 跨请求混批）
+  TTS->>GW: synth_part（每请求一块 PCM16 SHM）
+  TTS->>ASR: asr job（chunk 级）
+  Note over TTS,ASR: 与剩余合成重叠执行
+  ASR->>ASR: FunASR 字级对齐（读 SHM 块）
+  ASR->>GW: chunk_ts
+  GW->>GW: 音频 / 时间戳双账本按 req_id 收齐
+  GW-->>C: 6 键响应（audio_base64 + timestamp）
+  Note over GW: /v1 纯 TTS：跳过对齐，聚合后直接编码返回
 ```
 
-设计要点：聚合在网关（compute 无状态可混批）；`protocol.py` 为消息契约单一事实来源；
-自愈闭环——worker 崩溃/心跳停更/推理卡死（看门狗）→ supervisor 强杀重生，在途 chunk
-精确重派（请求不丢，网关按 idx 幂等去重），NPU 持续不可用走 fail-fast（warm=fail → 503 →
-编排层重启容器），客户端断连逐级取消任务。
+### 背压与拒单
+
+```mermaid
+flowchart LR
+  req([新请求]) --> g1{"受理门<br/>MAX_PENDING_REQUESTS"}
+  g1 -->|通过| g2{"SHM 水位门<br/>≥90% 拒新"}
+  g2 -->|通过| g3{"积压门<br/>EMA 排队估算 > 预算×1.15"}
+  g3 -->|通过| serve[进入流水线]
+  g1 -->|满| r["429 · Retry-After: 1"]
+  g2 -->|超水位| r
+  g3 -->|估超时| r
+  serve --> down[运行期：下游队列满]
+  down --> block[上游阻塞等待]
+  block --> more[更上游拒单 429]
+```
+
+拒绝原因由响应头 `X-Reject-Reason` 机器可读区分（`queue_full` / `shm_pressure` /
+`wait_budget`），细节见下方 429 章节。
+
+### 自愈闭环
+
+```mermaid
+flowchart LR
+  fault["故障<br/>崩溃 / 心跳停更 / 看门狗卡死"]
+  kill["supervisor 强杀重生<br/>指数退避拉起同角色"]
+  redispatch["在途 chunk 精确重派<br/>≤REDISPATCH_MAX · 网关按 idx 幂等去重"]
+  ok[恢复正常服务]
+  fault --> kill --> redispatch --> ok
+  kill -.反复失败.-> ff["fail-fast：NPU 持续不可用<br/>warm=fail → 503 → 编排层重启容器"]
+  ok -.零成功且仍有超时 · WEDGE_RESTART_S.-> wedge["exit(1) 交容器重启"]
+```
+
+redis-server 死亡 → supervisor 自动重启（队列重置，在途请求走超时兜底）；
+客户端断连逐级取消任务（CANCEL 下发，已派发批算完即弃）。
 
 ## 构建
 
