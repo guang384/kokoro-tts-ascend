@@ -101,6 +101,14 @@ def candidate_order(count, raw_env, smi_ids):
     start = os.getpid() % max(count, 1)
     for k in range(max(count, 0)):
         add_i((start + k) % count)
+    # 编排层注入的可见卡号（HAMi 注 ASCEND_RT_VISIBLE_DEVICES、
+    # ascend-docker-runtime 注 ASCEND_VISIBLE_DEVICES）：驱动层真值，
+    # 与 pipeline._pick_npu_device 第 3 层同算法
+    for var in ("ASCEND_RT_VISIBLE_DEVICES", "ASCEND_VISIBLE_DEVICES"):
+        for tok in os.getenv(var, "").split(","):
+            tok = tok.strip()
+            if tok.isdigit():
+                add_i(int(tok))
     for i in smi_ids:
         add_i(i)
     return order
@@ -121,7 +129,8 @@ def check_order(smi_ids, deep):
         add(WARN, "device_count（估算）", f"未做 torch 实探，按 smi 数量 {count} 估算")
     order = candidate_order(count, raw, smi_ids)
     add(OK, "ASCEND_DEVICE_ID", raw or "<未设置，自动发现>")
-    add(OK, "探测候选顺序", f"torch 枚举(pid 打散) 优先 → smi 兜底: {order}")
+    add(OK, "探测候选顺序",
+        f"显式 → torch 枚举(pid 打散) → env 可见卡 → smi 兜底: {order}")
     if raw.isdigit() and int(raw) >= count:
         add(WARN, "显式卡号越界", f"ASCEND_DEVICE_ID={raw} >= device_count({count})"
             "——vNPU 下属常态（会按显式值优先实探）")
@@ -161,8 +170,12 @@ def check_deep(smi_ids):
         count = int(torch.npu.device_count())
         add(OK, "torch.npu.device_count", str(count))
     except Exception as exc:  # noqa: BLE001
-        add(ERR, "torch.npu.device_count", f"{type(exc).__name__}: {exc}")
-        return
+        # vNPU 切分（HAMi 等）CANN 枚举可能整体缺失——不放弃，降级 count=0
+        # 继续实探显式/env/驱动层候选（与 pipeline._pick_npu_device 对齐）
+        count = 0
+        add(WARN, "torch.npu.device_count",
+            f"不可用: {type(exc).__name__}: {str(exc)[:80]}"
+            "——按 count=0 继续实探驱动层候选")
     raw = os.getenv("ASCEND_DEVICE_ID", "").strip()
     cands = candidate_order(count, raw, smi_ids)
     good = []

@@ -1,9 +1,11 @@
-"""NPU 设备探测：npu-smi 驱动层卡号解析 + 候选生成（vNPU 池化场景）。
+"""NPU 设备探测：npu-smi 驱动层卡号解析 + 候选生成（vNPU 切分/池化场景）。
 
-vNPU 故障模式（cnos-vpool 等池化）：CANN Runtime 枚举缺失/按物理槽位
-编号，torch.npu.device_count() 与真实可用标识不一致（count=1 但真标识
-是物理卡 7）——npu-smi 走驱动接口仍能报真实卡号，候选生成必须把
-「显式 ASCEND_DEVICE_ID（不丢）→ smi 卡号 → torch 枚举」三层并集。"""
+vNPU 故障模式（HAMi/cnos-vpool 等切分池化）：CANN Runtime 枚举缺失/按
+物理槽位编号，torch.npu.device_count() 抛异常或返回 0（count=1 但真标识
+是物理卡 7，甚至 count=0 但 npu-smi 看得见卡）——npu-smi/编排层注入的
+env 走驱动接口仍能报真实卡号。候选生成必须把「显式 ASCEND_DEVICE_ID
+（不丢）→ torch 枚举 → env 可见卡 → smi 卡号」并集，且枚举缺失时绝不
+提前放弃（历史缺陷：count<=0 直接 return，驱动层兜底永远走不到）。"""
 import sys
 import types
 
@@ -165,15 +167,20 @@ def test_smi_process_mb_negative_cache(monkeypatch):
     assert len(calls) == 2          # 首轮 info + proc-mem 兜底各一次
 
 
-def _fake_torch(calls, ok_name="npu:7", count=1):
+def _fake_torch(calls, ok_name="npu:7", count=1, count_raises=False):
     def _zeros(n, device=None):
         calls.append(device)
         if device != ok_name:
             raise RuntimeError("LazySetDevice failed (Device:0)")
         return object()
 
+    def _count():
+        if count_raises:
+            raise RuntimeError("Driver: enum devices init failed")
+        return count
+
     return types.SimpleNamespace(
-        npu=types.SimpleNamespace(device_count=lambda: count,
+        npu=types.SimpleNamespace(device_count=_count,
                                   synchronize=lambda d: None),
         device=lambda name: name,
         zeros=_zeros,
@@ -241,3 +248,72 @@ def test_all_probes_fail_returns_empty(monkeypatch):
     monkeypatch.setenv("ASCEND_DEVICE_ID", "7")
     monkeypatch.setattr(pipeline, "_smi_card_ids", lambda: [7])
     assert pipeline._pick_npu_device() == ""
+
+
+# ── vNPU 切分（HAMi）：CANN 枚举缺失（count=0/异常）时不得提前放弃 ──
+
+def _clear_env(monkeypatch):
+    """清掉编排层可见卡 env（宿主机/CI 可能残留，污染候选顺序断言）。"""
+    monkeypatch.delenv("ASCEND_RT_VISIBLE_DEVICES", raising=False)
+    monkeypatch.delenv("ASCEND_VISIBLE_DEVICES", raising=False)
+
+
+def test_count_zero_smi_fallback_still_probes(monkeypatch):
+    """vNPU 切分核心故障（HAMi 实测）：CANN 枚举返回 0 但驱动层看得见卡——
+    历史缺陷是 count<=0 直接 return，smi 兜底永远走不到。"""
+    calls = []
+    monkeypatch.setitem(sys.modules, "torch", _fake_torch(calls, count=0))
+    monkeypatch.setenv("ASCEND_DEVICE_ID", "")
+    _clear_env(monkeypatch)
+    monkeypatch.setattr(pipeline, "_smi_card_ids", lambda: [7])
+    assert pipeline._pick_npu_device() == "npu:7"
+    assert calls == ["npu:7"]
+
+
+def test_count_raises_smi_fallback_still_probes(monkeypatch):
+    """device_count() 抛异常（CANN 枚举整体崩溃）同样不得提前放弃。"""
+    calls = []
+    monkeypatch.setitem(sys.modules, "torch",
+                        _fake_torch(calls, count_raises=True))
+    monkeypatch.setenv("ASCEND_DEVICE_ID", "")
+    _clear_env(monkeypatch)
+    monkeypatch.setattr(pipeline, "_smi_card_ids", lambda: [7])
+    assert pipeline._pick_npu_device() == "npu:7"
+
+
+def test_count_zero_no_driver_candidates_fails_fast(monkeypatch):
+    """count=0 且显式/env/smi 全无候选 → ""（fail-fast 语义不丢）。"""
+    calls = []
+    monkeypatch.setitem(sys.modules, "torch", _fake_torch(calls, count=0))
+    monkeypatch.setenv("ASCEND_DEVICE_ID", "")
+    _clear_env(monkeypatch)
+    monkeypatch.setattr(pipeline, "_smi_card_ids", lambda: [])
+    assert pipeline._pick_npu_device() == ""
+    assert calls == []                            # 无候选则一次都不探
+
+
+def test_hami_visible_env_ids_feed_candidates(monkeypatch):
+    """HAMi 注入的 ASCEND_RT_VISIBLE_DEVICES 在枚举缺失时进候选实探——
+    它是"分给本容器的精确集合"。"""
+    calls = []
+    monkeypatch.setitem(sys.modules, "torch",
+                        _fake_torch(calls, ok_name="npu:4", count=0))
+    monkeypatch.setenv("ASCEND_DEVICE_ID", "")
+    monkeypatch.setenv("ASCEND_RT_VISIBLE_DEVICES", "4,5")
+    monkeypatch.delenv("ASCEND_VISIBLE_DEVICES", raising=False)
+    monkeypatch.setattr(pipeline, "_smi_card_ids", lambda: [])
+    assert pipeline._pick_npu_device() == "npu:4"
+    assert calls == ["npu:4"]
+
+
+def test_explicit_id_first_at_count_zero(monkeypatch):
+    """count=0 时显式 ASCEND_DEVICE_ID 仍排第一，不被 env/smi 超越。"""
+    calls = []
+    monkeypatch.setitem(sys.modules, "torch",
+                        _fake_torch(calls, ok_name="npu:3", count=0))
+    monkeypatch.setenv("ASCEND_DEVICE_ID", "3")
+    monkeypatch.setenv("ASCEND_VISIBLE_DEVICES", "5")
+    monkeypatch.delenv("ASCEND_RT_VISIBLE_DEVICES", raising=False)
+    monkeypatch.setattr(pipeline, "_smi_card_ids", lambda: [7])
+    assert pipeline._pick_npu_device() == "npu:3"
+    assert calls == ["npu:3"]

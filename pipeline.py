@@ -579,22 +579,28 @@ def capacity_check(tts_n: int, asr_n: int):
 
 
 def _pick_npu_device() -> str:
-    """自动发现容器内可用 NPU，兜住两类历史故障：
+    """自动发现容器内可用 NPU，兜住三类历史故障：
 
     - ASCEND_DEVICE_ID 填了宿主机物理卡号、但容器内只挂了一张卡
       （ERR00100: Invalid device ID，手动 --device 挂载在容器内从 0 重编号）
       → 告警后自动探测全部可见卡；
     - 指定卡存在但已被挂死（507014 aicore timeout）→ 实探失败自动换下一张，
-      一张都不可用则回落 CPU，服务不再带着坏卡上线。
+      一张都不可用则回落 CPU，服务不再带着坏卡上线；
+    - vNPU 切分（HAMi 等）后 CANN 枚举缺失：device_count() 抛异常或返回 0
+      而驱动层看得见卡 → 候选是无条件多层并集，绝不在枚举缺失时提前放弃
+      （生产实测：count=0 但 npu-smi 显示卡 7 健康）。
     """
     import torch
 
     try:
         count = int(torch.npu.device_count())
-    except Exception:
-        return ""
-    if count <= 0:
-        return ""
+    except Exception as exc:  # noqa: BLE001  vNPU 切分常态：CANN 枚举整体缺失
+        log.warning("torch.npu.device_count() failed (%s)——CANN 枚举缺失"
+                    "（vNPU 切分常态），跳过枚举层按显式/驱动层候选实探",
+                    str(exc)[:120])
+        count = 0
+    if count < 0:
+        count = 0
 
     raw = os.getenv("ASCEND_DEVICE_ID", "").strip()
     order: List[int] = []
@@ -611,11 +617,21 @@ def _pick_npu_device() -> str:
         _add(int(raw))
     # 2) torch 枚举（传统路径；pid 取模打散起点——多卡容器内多 worker 自动
     #    分摊到不同卡）。探测通过（zeros+synchronize 真执行）即为真可用
-    #    设备，先行不损任何场景
-    start = os.getpid() % count
-    for k in range(count):
-        _add((start + k) % count)
-    # 3) npu-smi 驱动层卡号兜底：vNPU 故障模式下 torch 枚举可能全失败
+    #    设备，先行不损任何场景。count<=0（vNPU 切分 CANN 枚举缺失）时本层
+    #    缺席，但 3)/4) 层照常补位
+    if count > 0:
+        start = os.getpid() % count
+        for k in range(count):
+            _add((start + k) % count)
+    # 3) 编排层注入的可见卡号：HAMi 注 ASCEND_RT_VISIBLE_DEVICES、
+    #    ascend-docker-runtime 注 ASCEND_VISIBLE_DEVICES（逗号分隔卡号）——
+    #    这是"分给本容器的精确集合"，枚举缺失时的权威真值
+    for var in ("ASCEND_RT_VISIBLE_DEVICES", "ASCEND_VISIBLE_DEVICES"):
+        for tok in os.getenv(var, "").split(","):
+            tok = tok.strip()
+            if tok.isdigit():
+                _add(int(tok))
+    # 4) npu-smi 驱动层卡号兜底：vNPU 故障模式下 torch 枚举可能全失败
     #    （生产自证：count=1 但 probe 全败，npu-smi 显示 NPU 7 健康）——
     #    此时驱动层卡号是唯一真值来源。放在枚举之后：smi 报的是物理卡号
     #    全集，排前面会让多卡容器的 pid 打散失效（全部 worker 挤最低卡）
@@ -624,10 +640,14 @@ def _pick_npu_device() -> str:
     if raw.isdigit() and int(raw) >= count:
         log.info("ASCEND_DEVICE_ID=%s exceeds torch count(%d)——vNPU 标识体系"
                  "与枚举数不一致属常态，按显式值优先实探", raw, count)
+    if count == 0 and order:
+        log.warning("CANN 枚举缺失/为 0，改按驱动层候选实探: %s", order)
 
     for idx in order:
         if _probe_npu(torch, idx):
             return f"npu:{idx}"
+    log.warning("NPU 自动发现失败：device_count=%d 显式=%r 候选=%s 全部实探"
+                "失败——查 npu-smi info 与容器设备挂载", count, raw, order)
     return ""
 
 
