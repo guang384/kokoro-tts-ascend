@@ -10,6 +10,7 @@ import time
 import pytest
 
 import proc_common as pc
+import redis_transport
 
 _PORT = 6399
 
@@ -59,7 +60,7 @@ def _drain(port, index, name, signal_q):
     import redis
 
     r = redis.Redis(host="127.0.0.1", port=port, decode_responses=False)
-    pc._make_redis_client = lambda: r      # 子进程内替换工厂（wrapper 惰性连接）
+    redis_transport._make_redis_client = lambda: r      # 子进程内替换工厂（wrapper 惰性连接）
     q = pc.InstrumentedQueue(64, index=index, name=name)
     n = 0
     deadline = time.monotonic() + 5
@@ -96,7 +97,7 @@ def test_consumer_killed_zero_queue_loss():
                 time.sleep(0.05)
         else:
             pytest.skip("redis-server 10s 内未就绪（端口 %d 被占用？）" % port)
-        pc._make_redis_client = lambda: redis.Redis(
+        redis_transport._make_redis_client = lambda: redis.Redis(
             host="127.0.0.1", port=port, decode_responses=False)
 
         ctx = mp.get_context("spawn")

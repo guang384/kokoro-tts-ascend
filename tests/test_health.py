@@ -11,7 +11,10 @@ import unittest.mock as mock
 import pytest
 
 import gateway
+import gateway_state
+import gateway_obs
 import proc_common
+import redis_transport
 import supervisor
 from tests.fake_queue import FakeQueue
 
@@ -24,8 +27,8 @@ def _write_heartbeat(health_dir: str, wtag: str, snapshot: dict) -> None:
 
 @pytest.fixture()
 def gw(monkeypatch, tmp_path):
-    monkeypatch.setattr(gateway, "_health_dir", str(tmp_path))
-    monkeypatch.setattr(gateway, "_result_q", None)
+    monkeypatch.setattr(gateway_state, "_health_dir", str(tmp_path))
+    monkeypatch.setattr(gateway_state, "_result_q", None)
     return gateway
 
 
@@ -33,13 +36,13 @@ def test_default_view_shape(gw):
     """_collect() 全量视图：status/ready/version/shm/e2e/queues/workers；
     queues 按请求流经顺序；workers 统一三件套（tts 加 realtime_x）；
     supervisor 不出现在 workers；健康 worker 无噪音。"""
-    _write_heartbeat(gw._health_dir, "tts-0", {
+    _write_heartbeat(gateway_state._health_dir, "tts-0", {
         "role": "tts", "device": "npu:0", "ready": True,
         "uptime_s": 100.0, "pid": 123, "warm": {"kokoro": "ok"},
         "stats": {"jobs": 3, "forward_ms": 420.0, "sentences": 3,
                   "audio_s": 71.1, "forward_errors": 0},
         "npu_mem": {"reserved_mb": 5120.0}})
-    _write_heartbeat(gw._health_dir, "gw-1", {
+    _write_heartbeat(gateway_state._health_dir, "gw-1", {
         "role": "gateway", "device": None, "ready": True, "warm": {"g2p": "off"},
         "stats": {"requests": 120, "results": 118, "latency_ms_sum": 489725.0,
                   "timeouts": 0, "rejections": 1, "pending": 0,
@@ -47,13 +50,13 @@ def test_default_view_shape(gw):
                   "recent_chars_sum": 90.0,
                   "recent_failures": [{"time": "10:00:01", "status": 504,
                                        "reason": "推理或对齐超时"}]}})
-    _write_heartbeat(gw._health_dir, "supervisor", {
+    _write_heartbeat(gateway_state._health_dir, "supervisor", {
         "role": "supervisor", "ready": True,
         "expected": {"tts": 1, "gateway": 1},
         "mailboxes": {"g2p_queue": {"depth": 2, "in": 5, "out": 3, "avg_wait_ms": 110.5},
                       "tts_queue": {"depth": 0, "in": 9, "out": 9, "avg_wait_ms": 75},
                       "gateway_queues[0]": {"depth": 1, "in": 4, "out": 3, "avg_wait_ms": 55.25}}})
-    d = gateway._collect()
+    d = gateway_obs._collect()
     assert {"status", "ready", "version", "shm", "e2e",
             "queues", "workers"} <= set(d)
     assert d["shm"] is None or (
@@ -89,13 +92,13 @@ def test_default_view_shape(gw):
 def test_warm_only_when_abnormal(gw):
     """warm 值只在异常时出现在 workers[]；无任何 ready 工人 → starting
     （不可服务是外层门槛，优先于 degraded）。"""
-    _write_heartbeat(gw._health_dir, "tts-1", {
+    _write_heartbeat(gateway_state._health_dir, "tts-1", {
         "role": "tts", "device": "npu:0", "ready": False,
         "uptime_s": 5.0, "warm": {"kokoro": "pending"}})
-    _write_heartbeat(gw._health_dir, "tts-2", {
+    _write_heartbeat(gateway_state._health_dir, "tts-2", {
         "role": "tts", "device": "npu:0", "ready": False,
         "warm": {"kokoro": "fail"}})
-    d = gateway._collect()
+    d = gateway_obs._collect()
     assert d["status"] == "starting"
     assert d["ready"] is False
     by_tag = {w["wtag"]: w for w in d["workers"]}
@@ -105,40 +108,40 @@ def test_warm_only_when_abnormal(gw):
 
 def test_warm_fail_degrades_when_serviceable(gw):
     """可服务（有 ready 工人）但存在 warm=fail → degraded。"""
-    _write_heartbeat(gw._health_dir, "supervisor", {
+    _write_heartbeat(gateway_state._health_dir, "supervisor", {
         "role": "supervisor", "ready": True, "expected": {"tts": 2},
         "mailboxes": {}})
-    _write_heartbeat(gw._health_dir, "tts-0", {
+    _write_heartbeat(gateway_state._health_dir, "tts-0", {
         "role": "tts", "device": "npu:0", "ready": True,
         "warm": {"kokoro": "ok"},
         "stats": {"jobs": 1, "forward_ms": 100.0, "audio_s": 5.0}})
-    _write_heartbeat(gw._health_dir, "tts-2", {
+    _write_heartbeat(gateway_state._health_dir, "tts-2", {
         "role": "tts", "device": "npu:0", "ready": False,
         "warm": {"kokoro": "fail"}})
-    d = gateway._collect()
+    d = gateway_obs._collect()
     assert d["status"] == "degraded"
     assert d["ready"] is True  # tts-0 可服务
 def test_ramp_up_ready_semantics(gw):
     """串行启动扩容期（核心新语义）：期望 6 个 tts，只有 1 个 ready——
     服务整体就算 ready（可接流量），status=ok；热身中的 worker 带待处理
     的 warm 标记可见。"""
-    _write_heartbeat(gw._health_dir, "supervisor", {
+    _write_heartbeat(gateway_state._health_dir, "supervisor", {
         "role": "supervisor", "ready": True,
         "expected": {"gateway": 2, "g2p": 2, "tts": 6, "asr": 3},
         "mailboxes": {}})
     for role, n in (("gateway", 2), ("g2p", 2), ("asr", 3)):
         for i in range(n):
-            _write_heartbeat(gw._health_dir, f"{role}-{i}", {
+            _write_heartbeat(gateway_state._health_dir, f"{role}-{i}", {
                 "role": role, "ready": True, "warm": {}, "stats": {}})
-    _write_heartbeat(gw._health_dir, "tts-0", {
+    _write_heartbeat(gateway_state._health_dir, "tts-0", {
         "role": "tts", "device": "npu:0", "ready": True,
         "warm": {"kokoro": "ok"},
         "stats": {"jobs": 2, "forward_ms": 260.0, "audio_s": 8.0}})
     for i in range(1, 6):  # 其余 5 个热身中
-        _write_heartbeat(gw._health_dir, f"tts-{i}", {
+        _write_heartbeat(gateway_state._health_dir, f"tts-{i}", {
             "role": "tts", "device": "npu:0", "ready": False,
             "warm": {"kokoro": "pending"}})
-    d = gateway._collect()
+    d = gateway_obs._collect()
     assert d["ready"] is True        # 能力就绪：每角色 ≥1 → 整个服务 ready
     assert d["status"] == "ok"       # 扩容期无异常 → ok（可接流量）
     by_tag = {w["wtag"]: w for w in d["workers"]}
@@ -149,13 +152,13 @@ def test_ramp_up_ready_semantics(gw):
 
 
 def test_missing_roles_reflected_in_status(gw):
-    _write_heartbeat(gw._health_dir, "supervisor", {
+    _write_heartbeat(gateway_state._health_dir, "supervisor", {
         "role": "supervisor", "ready": True,
         "expected": {"tts": 2, "asr": 1},
         "mailboxes": {}})
-    _write_heartbeat(gw._health_dir, "tts-0", {
+    _write_heartbeat(gateway_state._health_dir, "tts-0", {
         "role": "tts", "device": "npu:0", "ready": True, "warm": {}})
-    d = gateway._collect()
+    d = gateway_obs._collect()
     assert d["status"] == "starting"
     assert d["queues"] == {}
 
@@ -165,45 +168,45 @@ def test_backpressure_logged_not_returned(gw):
     logged = []
     with mock.patch.object(gateway.log, "warning",
                            side_effect=lambda msg, *a: logged.append(msg % a if a else msg)):
-        _write_heartbeat(gw._health_dir, "supervisor", {
+        _write_heartbeat(gateway_state._health_dir, "supervisor", {
             "role": "supervisor", "ready": True,
             "expected": {"tts": 1},
-            "mailboxes": {"tts_queue": {"depth": gateway._WORKER_MAILBOX_SIZE,
+            "mailboxes": {"tts_queue": {"depth": gateway_state._WORKER_MAILBOX_SIZE,
                                         "in": 1200, "out": 176, "avg_wait_ms": 6100},
-                          "gateway_queues[0]": {"depth": int(gateway._WORKER_MAILBOX_SIZE * 0.5),
+                          "gateway_queues[0]": {"depth": int(gateway_state._WORKER_MAILBOX_SIZE * 0.5),
                                                 "in": 10, "out": 10, "avg_wait_ms": 15},
-                          "gateway_queues[1]": {"depth": int(gateway._WORKER_MAILBOX_SIZE * 0.4),
+                          "gateway_queues[1]": {"depth": int(gateway_state._WORKER_MAILBOX_SIZE * 0.4),
                                                 "in": 10, "out": 10, "avg_wait_ms": 12}}})
-        _write_heartbeat(gw._health_dir, "tts-0", {
+        _write_heartbeat(gateway_state._health_dir, "tts-0", {
             "role": "tts", "device": "npu:0", "ready": True, "warm": {}})
-        d = gateway._collect()
-    assert d["queues"]["tts"]["depth"] == gateway._WORKER_MAILBOX_SIZE
-    assert d["queues"]["gateway"]["depth"] == int(gateway._WORKER_MAILBOX_SIZE * 0.5) \
-        + int(gateway._WORKER_MAILBOX_SIZE * 0.4)
+        d = gateway_obs._collect()
+    assert d["queues"]["tts"]["depth"] == gateway_state._WORKER_MAILBOX_SIZE
+    assert d["queues"]["gateway"]["depth"] == int(gateway_state._WORKER_MAILBOX_SIZE * 0.5) \
+        + int(gateway_state._WORKER_MAILBOX_SIZE * 0.4)
     assert d["queues"]["gateway"]["avg_wait_ms"] == 15  # 多实例取最慢
     assert any("queue backlog: tts_queue" in line for line in logged)
     assert not any("gateway_queues[1]" in line for line in logged)  # 40% 不判
 
 
 def test_stale_heartbeat_excluded(gw):
-    _write_heartbeat(gw._health_dir, "tts-dead", {
+    _write_heartbeat(gateway_state._health_dir, "tts-dead", {
         "role": "tts", "device": "npu:0", "ready": True, "warm": {}})
-    old = time.time() - gateway._HEALTH_STALE_AFTER - 10
-    os.utime(os.path.join(gw._health_dir, "worker-tts-dead.json"), (old, old))
-    _write_heartbeat(gw._health_dir, "tts-0", {
+    old = time.time() - gateway_state._HEALTH_STALE_AFTER - 10
+    os.utime(os.path.join(gateway_state._health_dir, "worker-tts-dead.json"), (old, old))
+    _write_heartbeat(gateway_state._health_dir, "tts-0", {
         "role": "tts", "device": "npu:0", "ready": True, "warm": {}})
-    d = gateway._collect()
+    d = gateway_obs._collect()
     assert [w["wtag"] for w in d["workers"]] == ["tts-0"]
 
 
 def test_asr_metrics_in_view(gw):
     """asr 三件套 + err 聚合（drops+errors）。batcher 角色已删除（认领式）。"""
-    _write_heartbeat(gw._health_dir, "asr-0", {
+    _write_heartbeat(gateway_state._health_dir, "asr-0", {
         "role": "asr", "device": "npu:0", "ready": True,
         "warm": {"funasr": "ok"},
         "stats": {"jobs": 57, "asr_ms": 46467.7, "job_drops": 1,
                   "job_errors": 2}})
-    d = gateway._collect()
+    d = gateway_obs._collect()
     by_tag = {w["wtag"]: w for w in d["workers"]}
     assert by_tag["asr-0"]["done"] == 57
     assert by_tag["asr-0"]["avg_ms"] == 815.22
@@ -212,20 +215,20 @@ def test_asr_metrics_in_view(gw):
 
 def test_role_metrics_div_zero_and_err(gw):
     """除零防护：无完成量时 avg_ms 不出现；err 按角色聚合口径；g2p/asr 覆盖。"""
-    _write_heartbeat(gw._health_dir, "tts-9", {
+    _write_heartbeat(gateway_state._health_dir, "tts-9", {
         "role": "tts", "device": "npu:0", "ready": True, "warm": {"kokoro": "ok"},
         "stats": {"jobs": 0, "forward_ms": 0.0, "audio_s": 0.0, "forward_errors": 0}})
-    _write_heartbeat(gw._health_dir, "g2p-0", {
+    _write_heartbeat(gateway_state._health_dir, "g2p-0", {
         "role": "g2p", "ready": True,
         "stats": {"requests": 0, "g2p_ms": 0.0, "errors": 0}})
-    _write_heartbeat(gw._health_dir, "g2p-1", {
+    _write_heartbeat(gateway_state._health_dir, "g2p-1", {
         "role": "g2p", "ready": True,
         "stats": {"requests": 40, "g2p_ms": 1522.0, "errors": 1}})
-    _write_heartbeat(gw._health_dir, "asr-2", {
+    _write_heartbeat(gateway_state._health_dir, "asr-2", {
         "role": "asr", "device": "npu:0", "ready": True, "warm": {"funasr": "ok"},
         "stats": {"jobs": 15, "asr_ms": 13206.0, "job_drops": 1,
                   "job_errors": 0}})
-    d = gateway._collect()
+    d = gateway_obs._collect()
     by_tag = {w["wtag"]: w for w in d["workers"]}
     assert "avg_ms" not in by_tag["tts-9"]        # 除零：无前向不出现 avg_ms
     assert "realtime_x" not in by_tag["tts-9"]
@@ -271,7 +274,7 @@ def test_instrumented_queue_counts(fakeredis_client, monkeypatch):
     """InstrumentedQueue（Redis 后端）：in/out 服务端 INCR 计数、depth=LLEN
     真实等待处理数、avg_wait_ms（EMA，首样本=实际等待）；_q_ts 用后即除
     （消息体不带时间戳污染下游）。"""
-    monkeypatch.setattr(proc_common, "_make_redis_client", lambda: fakeredis_client)
+    monkeypatch.setattr(redis_transport, "_make_redis_client", lambda: fakeredis_client)
     q = proc_common.InstrumentedQueue(0, index=42)
     q.put_nowait({"req_id": "held"})
     time.sleep(0.1)                            # 压着不取：等待 ~100ms
@@ -293,7 +296,7 @@ def test_instrumented_queue_counts(fakeredis_client, monkeypatch):
 def test_depth_is_true_queue_length(fakeredis_client, monkeypatch):
     """depth 语义 = LLEN = 队列里真实等待处理的消息数：put 后立即可见、
     消费后归零、空闲必归零（无 enq-deq 记账漂移——113/57 幻影的根治）。"""
-    monkeypatch.setattr(proc_common, "_make_redis_client", lambda: fakeredis_client)
+    monkeypatch.setattr(redis_transport, "_make_redis_client", lambda: fakeredis_client)
     q = proc_common.InstrumentedQueue(0, index=44)
     try:
         q.put_nowait({"i": 0})
@@ -318,24 +321,24 @@ def test_degraded_serviceable_returns_200(gw):
     """degraded = 可服务但部分异常（如一个 tts 预热失败、另一个在服务）：
     /health 必须 200——liveness 绝不重启仍能接单的容器。
     （CPU 降级功能已移除：NPU 持续失败走 fail-fast 503→容器重启）"""
-    _write_heartbeat(gw._health_dir, "supervisor", {
+    _write_heartbeat(gateway_state._health_dir, "supervisor", {
         "role": "supervisor", "ready": True, "expected": {"tts": 2},
         "mailboxes": {}})
-    _write_heartbeat(gw._health_dir, "tts-0", {
+    _write_heartbeat(gateway_state._health_dir, "tts-0", {
         "role": "tts", "device": "npu:0", "ready": True,
         "warm": {"kokoro": "ok"},
         "stats": {"jobs": 1, "forward_ms": 100.0, "audio_s": 5.0}})
-    _write_heartbeat(gw._health_dir, "tts-1", {
+    _write_heartbeat(gateway_state._health_dir, "tts-1", {
         "role": "tts", "device": None, "ready": False,
         "warm": {"kokoro": "fail"}, "stats": {}})
-    d = gateway._collect()
+    d = gateway_obs._collect()
     assert d["status"] == "degraded" and d["ready"] is True
     r = asyncio.run(gateway.health())
     assert r.status_code == 200
     assert json.loads(r.body)["status"] == "degraded"
 
     # 反向：tts 全灭（零 ready）→ 503 → 编排层重启容器（fail-fast 兜底）
-    _write_heartbeat(gw._health_dir, "tts-0", {
+    _write_heartbeat(gateway_state._health_dir, "tts-0", {
         "role": "tts", "device": None, "ready": False,
         "warm": {"kokoro": "fail"}, "stats": {}})
     r = asyncio.run(gateway.health())
@@ -346,16 +349,16 @@ def test_degraded_serviceable_returns_200(gw):
 
 def test_worker_crash_count_exposed(gw):
     """supervisor 心跳的 crashes 统计透传到 workers[] 对应行（>0 才出现）。"""
-    _write_heartbeat(gw._health_dir, "supervisor", {
+    _write_heartbeat(gateway_state._health_dir, "supervisor", {
         "role": "supervisor", "ready": True,
         "expected": {"tts": 1},
         "stats": {"crashes": {"tts-0": 3}},
         "mailboxes": {}})
-    _write_heartbeat(gw._health_dir, "tts-0", {
+    _write_heartbeat(gateway_state._health_dir, "tts-0", {
         "role": "tts", "device": "npu:0", "ready": True,
         "warm": {"kokoro": "ok"},
         "stats": {"jobs": 1, "forward_ms": 100.0, "audio_s": 5.0}})
-    d = gateway._collect()
+    d = gateway_obs._collect()
     entry = [w for w in d["workers"] if w["wtag"] == "tts-0"][0]
     assert entry["crashes"] == 3
 
@@ -374,10 +377,10 @@ def test_shm_usage_exposed(gw, monkeypatch):
         monkeypatch.setattr(gateway.os, "statvfs", lambda p: _St(), raising=False)
     else:
         monkeypatch.setattr(gateway.os, "statvfs", lambda p: _St())
-    _write_heartbeat(gw._health_dir, "supervisor", {
+    _write_heartbeat(gateway_state._health_dir, "supervisor", {
         "role": "supervisor", "ready": True, "expected": {},
         "mailboxes": {}})
-    d = gateway._collect()
+    d = gateway_obs._collect()
     total = round(4096 * 256 / 2**20, 1)          # 1.0 MiB
     used = round(4096 * (256 - 64) / 2**20, 1)    # 0.75 MiB（round 后 0.8）
     assert d["shm"] == {"total_mb": total, "used_mb": used,
@@ -390,13 +393,13 @@ def test_shm_usage_exposed(gw, monkeypatch):
 def test_orphan_age_floor_covers_both_waits():
     """回收线不低于 2×WAIT+60：/tts 音频等待 + 时间戳等待串行 = 块的最长
     合法持有期；显式配小会被公式抬高（防误扫活块）。"""
-    assert gateway.SHM_ORPHAN_MAX_AGE_S >= 2 * gateway._entry_wait_s + 60
+    assert gateway_state.SHM_ORPHAN_MAX_AGE_S >= 2 * gateway_state._entry_wait_s + 60
 
 
 def test_orphan_shm_swept_by_age(gw, monkeypatch, tmp_path):
     """清道夫：只回收 kokora_ 前缀且超龄的块；新鲜块与非本服务文件保留。"""
-    monkeypatch.setattr(gateway, "_SHM_SWEEP_DIR", str(tmp_path))
-    monkeypatch.setattr(gateway, "SHM_ORPHAN_MAX_AGE_S", 300.0)
+    monkeypatch.setattr(gateway_state, "_SHM_SWEEP_DIR", str(tmp_path))
+    monkeypatch.setattr(gateway_state, "SHM_ORPHAN_MAX_AGE_S", 300.0)
 
     old_f = tmp_path / "kokora_old"          # 超龄孤儿 → 回收
     new_f = tmp_path / "kokora_new"          # 新鲜块（合法生命周期内）→ 保留
@@ -407,16 +410,16 @@ def test_orphan_shm_swept_by_age(gw, monkeypatch, tmp_path):
     t = __import__("time").time() - 400
     _os.utime(old_f, (t, t))
 
-    n = gateway._sweep_orphan_shm()
+    n = gateway_obs._sweep_orphan_shm()
     assert n == 1
     assert not old_f.exists()
     assert new_f.exists() and other.exists()
 
 
 def test_orphan_sweep_tolerates_missing_dir(gw, monkeypatch):
-    monkeypatch.setattr(gateway, "_SHM_SWEEP_DIR",
-                        gw._health_dir + "/nope")   # 不存在的目录
-    assert gateway._sweep_orphan_shm() == 0   # 目录不存在 → 0，不抛
+    monkeypatch.setattr(gateway_state, "_SHM_SWEEP_DIR",
+                        gateway_state._health_dir + "/nope")   # 不存在的目录
+    assert gateway_obs._sweep_orphan_shm() == 0   # 目录不存在 → 0，不抛
 
 
 def test_ship_batch_names_blocks_kokora(tmp_path):
@@ -452,15 +455,15 @@ def test_ship_batch_names_blocks_kokora(tmp_path):
 def test_e2e_metrics_merge_across_gateways(gw):
     """顶层 e2e 全局聚合：双网关的受理/成功求和，滑动平均按窗口计数加权，
     失败跨网关合并按时间取最新 3 条；workers[] 恢复纯实例事实（不含 e2e）。"""
-    gateway._recent_latencies.clear()
-    gateway._recent_failures.clear()
+    gateway_state._recent_latencies.clear()
+    gateway_state._recent_failures.clear()
     gateway._record_failure(504, "超时A")
     gateway._record_failure(502, "前向失败B")
 
-    _write_heartbeat(gw._health_dir, "supervisor", {
+    _write_heartbeat(gateway_state._health_dir, "supervisor", {
         "role": "supervisor", "ready": True, "expected": {"gateway": 2},
         "mailboxes": {}})
-    _write_heartbeat(gw._health_dir, "gw-1", {
+    _write_heartbeat(gateway_state._health_dir, "gw-1", {
         "role": "gateway", "device": None, "ready": True, "warm": {},
         "stats": {"requests": 100, "results": 90, "timeouts": 2, "rejections": 5,
                   "latency_ms_sum": 1000.0,
@@ -468,14 +471,14 @@ def test_e2e_metrics_merge_across_gateways(gw):
                   "recent_failures": [
                       {"time": "10:00:01", "status": 504, "reason": "超时A"},
                       {"time": "10:00:02", "status": 502, "reason": "前向失败B"}]}})
-    _write_heartbeat(gw._health_dir, "gw-2", {
+    _write_heartbeat(gateway_state._health_dir, "gw-2", {
         "role": "gateway", "device": None, "ready": True, "warm": {},
         "stats": {"requests": 50, "results": 45, "timeouts": 1, "rejections": 3,
                   "latency_ms_sum": 500.0,
                   "recent_count": 1, "recent_ms_sum": 1000.0, "recent_chars_sum": 60.0,
                   "recent_failures": [{"time": "10:00:03", "status": 500,
                                        "reason": "合成失败C"}]}})
-    d = gateway._collect()
+    d = gateway_obs._collect()
     e = d["e2e"]
     assert e["requests"] == 150 and e["successes"] == 135
     assert e["timed_out"] == 3 and e["rejected"] == 8
@@ -489,19 +492,19 @@ def test_e2e_metrics_merge_across_gateways(gw):
 
 def test_recent_latencies_window_bounded():
     """滑动窗口上限 50：追加 60 条只留最近 50 条。"""
-    gateway._recent_latencies.clear()
+    gateway_state._recent_latencies.clear()
     for i in range(60):
-        gateway._recent_latencies.append((i * 0.001, i))
-    assert len(gateway._recent_latencies) == 50
-    assert gateway._recent_latencies[0] == (10 * 0.001, 10)   # 最旧 9 条已滚出
+        gateway_state._recent_latencies.append((i * 0.001, i))
+    assert len(gateway_state._recent_latencies) == 50
+    assert gateway_state._recent_latencies[0] == (10 * 0.001, 10)   # 最旧 9 条已滚出
 
 
 def test_record_failure_truncates_reason():
-    gateway._recent_failures.clear()
+    gateway_state._recent_failures.clear()
     gateway._record_failure(500, "很长的原因" * 100)
-    f = gateway._recent_failures[-1]
+    f = gateway_state._recent_failures[-1]
     assert len(f["reason"]) <= 80
-    gateway._recent_failures.clear()
+    gateway_state._recent_failures.clear()
 
 
 
@@ -510,10 +513,10 @@ def test_health_route_status_code_gate(gw):
     """K8s readinessProbe 门闸：ready=false → HTTP 503（JSON 体完整）；
     ready=true → 200。"""
     # supervisor 期望 gateway+tts，tts 零就绪 → ready=False → 503
-    _write_heartbeat(gw._health_dir, "supervisor", {
+    _write_heartbeat(gateway_state._health_dir, "supervisor", {
         "role": "supervisor", "ready": True, "expected": {"gateway": 1, "tts": 1},
         "mailboxes": {}})
-    _write_heartbeat(gw._health_dir, "gw-1", {
+    _write_heartbeat(gateway_state._health_dir, "gw-1", {
         "role": "gateway", "device": None, "ready": True, "warm": {},
         "stats": {"requests": 0, "results": 0, "latency_ms_sum": 0.0}})
     # /health = 三探针共用：未就绪 503（readiness 摘流量 + startupProbe 宽限保护）
@@ -524,7 +527,7 @@ def test_health_route_status_code_gate(gw):
     assert set(body) == {"status", "ready", "version", "shm", "recent_failures"}
 
     # tts-0 就绪 → 每角色 ≥1 → 200（K8s 开始接流量）
-    _write_heartbeat(gw._health_dir, "tts-0", {
+    _write_heartbeat(gateway_state._health_dir, "tts-0", {
         "role": "tts", "device": "npu:0", "ready": True, "warm": {"kokoro": "ok"},
         "stats": {"jobs": 1, "forward_ms": 100.0, "audio_s": 5.0}})
     d = asyncio.run(gateway.health())
@@ -540,14 +543,14 @@ def test_ipc_dropped_surfaces_in_worker_err(gw):
     """ipc_dropped 正向链路：worker stats 携带该键时计入 workers[].err
     （/metrics kokoro_worker_errors_total 同源）——受控丢弃直接回答"504
     是谁丢的"。缺键路径已由其余 fixture 隐式覆盖（.get or 0 不炸）。"""
-    _write_heartbeat(gw._health_dir, "tts-0", {
+    _write_heartbeat(gateway_state._health_dir, "tts-0", {
         "role": "tts", "device": "npu:0", "ready": True, "warm": {"kokoro": "ok"},
         "stats": {"jobs": 5, "forward_ms": 100.0,
                   "forward_errors": 0, "ipc_dropped": 2}})
-    _write_heartbeat(gw._health_dir, "g2p-0", {
+    _write_heartbeat(gateway_state._health_dir, "g2p-0", {
         "role": "g2p", "device": None, "ready": True, "warm": {"g2p": "ok"},
         "stats": {"requests": 3, "g2p_ms": 10.0, "errors": 0, "ipc_dropped": 0}})
-    d = gw._collect()
+    d = gateway_obs._collect()
     rows = {w["wtag"]: w for w in d["workers"]}
     assert rows["tts-0"]["err"] == 2          # ipc_dropped 计入 err
     assert "err" not in rows["g2p-0"]         # 0 不显示（既有口径）
@@ -555,12 +558,12 @@ def test_ipc_dropped_surfaces_in_worker_err(gw):
 
 def test_recent_latency_quantiles():
     """滑动窗口分位数：p50/p90/p99 线性插值正确、进心跳 stats、空窗不上报。"""
-    gateway._recent_latencies.clear()
+    gateway_state._recent_latencies.clear()
     for s_ in (0.5, 1.0, 2.0, 4.0, 8.0):
-        gateway._recent_latencies.append((s_, 10))
-    snap = gateway._worker_snapshot()
+        gateway_state._recent_latencies.append((s_, 10))
+    snap = gateway_obs._worker_snapshot()
     assert snap["stats"]["p50_s"] == 2.0
     assert snap["stats"]["p90_s"] == round(4.0 * 0.4 + 8.0 * 0.6, 3)   # 6.4（pos=3.6：40% 处于 4.0）
     assert snap["stats"]["p99_s"] == round(4.0 * 0.04 + 8.0 * 0.96, 3)  # 7.84
-    gateway._recent_latencies.clear()
-    assert "p50_s" not in gateway._worker_snapshot()["stats"]
+    gateway_state._recent_latencies.clear()
+    assert "p50_s" not in gateway_obs._worker_snapshot()["stats"]

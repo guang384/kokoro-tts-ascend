@@ -31,7 +31,7 @@ import sys
 import time
 from pathlib import Path
 
-# 设备自动选择：FUNASR_DEVICE 未设置/auto 时跟随 pipeline._resolve_device
+# 设备自动选择：FUNASR_DEVICE 未设置/auto 时跟随 npu_ops._resolve_device
 # （有可用 NPU 就上卡；无 torch_npu 的开发机回落 CPU）；显式 cpu/npu 覆盖。
 # docker exec 不会执行镜像 ENTRYPOINT，CANN set_env.sh 未加载时 tbe 缺失；
 # 这里自动通过 scripts/with_ascend_env.sh 重入一次，避免手写一长串 source。

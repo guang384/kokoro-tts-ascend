@@ -8,6 +8,7 @@ import fakeredis
 import pytest
 
 import proc_common
+import redis_transport
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -25,6 +26,6 @@ def fakeredis_client(monkeypatch):
     _make_redis_client。"""
     server = fakeredis.FakeServer()
     client = fakeredis.FakeStrictRedis(server=server, decode_responses=False)
-    monkeypatch.setattr(proc_common, "_make_redis_client", lambda: client)
-    monkeypatch.setattr(proc_common, "_SHARED_REDIS", None)  # 单例重置：上个测试的 FakeServer 连接已死
+    monkeypatch.setattr(redis_transport, "_make_redis_client", lambda: client)
+    monkeypatch.setattr(redis_transport, "_SHARED_REDIS", None)  # 单例重置：上个测试的 FakeServer 连接已死
     return client

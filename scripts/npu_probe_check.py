@@ -149,7 +149,7 @@ def check_memory():
     rc, out, _ = run(["npu-smi", "info", "-m"])
     if rc == 0 and out:
         add(OK, "显存快照", out.splitlines()[0][:100])
-    # 预算对拍（与 pipeline._auto_budget_mb 同公式，默认参数）
+    # 预算对拍（与 npu_ops._auto_budget_mb 同公式，默认参数）
     # L = ceil(120*1.03)+2 = 126；F = ceil(126*17.5/0.5) = 4410
     F, batch = 4410, 4
     live = 3 * batch * 128 * 60 * F * 4 / 2**20 * 1.15

@@ -28,6 +28,7 @@ import sys
 import time
 
 import proc_common
+import redis_transport
 
 log = proc_common.setup_logging("supervisor")   # 尊重 LOG_LEVEL，格式与其余角色统一
 
@@ -346,7 +347,7 @@ def _sweep_inflight() -> None:
     在途死亡，属既有自愈闭环。"""
     global _redis_client
     if _redis_client is None:
-        _redis_client = proc_common._make_redis_client()
+        _redis_client = redis_transport._make_redis_client()
     try:
         # 存活 pid 集合（BRPOPLPUSH 级追踪）：重派条件是「worker 已死」
         # 而非「TTL 超时」——慢 worker 不被误重派（重复前向/部分重叠的
@@ -397,7 +398,7 @@ def _check_redis() -> None:
     log.critical("redis-server died (rc=%s), restarting "
                  "(queues+in-flight lost, requests fall back to WAIT 504)",
                  _redis_proc.returncode)
-    _redis_proc = proc_common.start_redis_server()
+    _redis_proc = redis_transport.start_redis_server()
     _redis_client = None                      # 旧实例连接已死，下轮重建
 
 
@@ -655,7 +656,7 @@ def main() -> None:
     _clean_stale_heartbeats()
     create_mailboxes()
     global _redis_proc, _tts_queue, _asr_queue
-    _redis_proc = proc_common.start_redis_server()  # 队列服务端：单容器自治，fail-fast
+    _redis_proc = redis_transport.start_redis_server()  # 队列服务端：单容器自治，fail-fast
     _tts_queue = mailboxes["tts_queue"]             # sweeper 持队列实例（键由它决定）
     _asr_queue = mailboxes["asr_queue"]
     if _redis_proc is None:   # IPC_REDIS_URL 外部模式
@@ -670,9 +671,9 @@ def main() -> None:
     # 启动容量自检（仅 npu；非 npu/驱动不可用静默跳过）：默认配置按 64GB
     # 整卡设计，旧部署沿用旧 env 时可能超卡——超 95% 记 ERROR 但不拒绝启动。
     try:
-        import pipeline
+        import npu_ops
 
-        cap = pipeline.capacity_check(TTS_N, ASR_N)
+        cap = npu_ops.capacity_check(TTS_N, ASR_N)
     except Exception:  # noqa: BLE001  自检失败不能阻塞编排
         cap = None
     if cap is not None:

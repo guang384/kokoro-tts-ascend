@@ -11,6 +11,7 @@ import sys
 
 import pytest
 
+import npu_ops
 import protocol
 
 
@@ -258,19 +259,17 @@ def test_torch_import_probe_handles_all_failures(monkeypatch):
     构造期必须能活。"""
     import subprocess
 
-    import pipeline
-
     def timeout_run(*a, **kw):
         raise subprocess.TimeoutExpired(cmd="python", timeout=120)
 
     monkeypatch.setattr(subprocess, "run", timeout_run)
-    assert pipeline._torch_import_ok() is False
+    assert npu_ops._torch_import_ok() is False
 
     def missing_run(*a, **kw):
         raise FileNotFoundError("python")
 
     monkeypatch.setattr(subprocess, "run", missing_run)
-    assert pipeline._torch_import_ok() is False
+    assert npu_ops._torch_import_ok() is False
 
 
 def test_en_callable_lazy_and_cached(monkeypatch):
@@ -285,7 +284,7 @@ def test_en_callable_lazy_and_cached(monkeypatch):
         calls["probe"] += 1
         return False
 
-    monkeypatch.setattr(pipeline, "_torch_import_ok", fake_probe)
+    monkeypatch.setattr(npu_ops, "_torch_import_ok", fake_probe)
     monkeypatch.setenv("KOKORO_EN_G2P", "spacy")
     fn = pipeline._build_en_callable()
     assert fn("Kokoro") == "kˈOkəɹO"       # special：不触发解析

@@ -9,7 +9,10 @@ from multiprocessing import shared_memory
 
 import numpy as np
 
+import asr_worker
 import compute
+import tts_worker
+import worker_common
 import proc_common
 import protocol
 from tests import rnd
@@ -193,12 +196,13 @@ def test_npu_load_paths_wired_with_busy():
     KModel 加载/冒烟前向/FunASR 加载与冒烟）必须经 _with_busy 接线。"""
     from pathlib import Path
 
-    src = Path(compute.__file__).read_text(encoding="utf-8")
-    for token in ("_with_busy(pipeline.get_compute)",
-                  "_with_busy(compute.synth_batch_smoke)",
-                  "_with_busy(funasr_ts.get_model)",
-                  "_with_busy(_smoke)"):
-        assert token in src, f"加载链失去看门狗覆盖: {token}"
+    tts_src = Path(tts_worker.__file__).read_text(encoding="utf-8")
+    asr_src = Path(asr_worker.__file__).read_text(encoding="utf-8")
+    for token, src_ in (("_with_busy(pipeline.get_compute)", tts_src),
+                        ("_with_busy(compute.synth_batch_smoke)", tts_src),
+                        ("_with_busy(funasr_ts.get_model)", asr_src),
+                        ("_with_busy(_smoke)", asr_src)):
+        assert token in src_, f"加载链失去看门狗覆盖: {token}"
 
 
 # ── asr 批循环：_run_asr_batch 的回投/隔离/降级契约（funasr_ts 打桩，无模型） ──
@@ -557,8 +561,7 @@ def test_asr_batch_wiring():
     全文件 grep 会漏掉 asr 回退。"""
     from pathlib import Path
 
-    src = Path(compute.__file__).read_text(encoding="utf-8")
-    asr_src = src[src.index("def asr_main"):]
+    asr_src = Path(asr_worker.__file__).read_text(encoding="utf-8")
     assert "min(_ASR_MAX_BATCH, funasr_ts.effective_batch()), worker_id)" in asr_src
     assert "claim_queue.ack(members, worker_id)" in asr_src
     assert "claim_queue.claim(1, worker_id)" not in asr_src
@@ -566,12 +569,12 @@ def test_asr_batch_wiring():
 
 def test_sample_asr_mem_records_heartbeat_snapshot(monkeypatch):
     """asr worker 主线程采样 → 心跳 npu_mem（metrics 的 per-worker 明细源）。"""
-    import pipeline
+    import npu_ops
 
-    monkeypatch.setattr(pipeline, "asr_budget_meta", lambda: (1818, 500, 30.0))
-    monkeypatch.setattr(pipeline, "asr_budget_error", lambda: None)
+    monkeypatch.setattr(npu_ops, "asr_budget_meta", lambda: (1818, 500, 30.0))
+    monkeypatch.setattr(npu_ops, "asr_budget_error", lambda: None)
     monkeypatch.setattr(
-        pipeline, "npu_mem_estimate",
+        npu_ops, "npu_mem_estimate",
         lambda dev, budget, ctx: {"reserved_mb": 1780.0,
                                   "estimated_mb": 2230.0,
                                   "context_mb": ctx,
@@ -579,14 +582,14 @@ def test_sample_asr_mem_records_heartbeat_snapshot(monkeypatch):
                                   "process_mb": 2196.0,
                                   "delta_mb": -35.6,
                                   "context_actual_mb": 416.0})
-    monkeypatch.setattr(compute, "_asr_state", {"device": "npu:0"})
-    monkeypatch.setattr(compute, "_stats", dict(compute._stats))
+    monkeypatch.setattr(asr_worker, "_asr_state", {"device": "npu:0"})
+    monkeypatch.setattr(worker_common, "_stats", dict(worker_common._stats))
 
     compute._sample_asr_mem()
-    assert compute._stats["npu_mem"]["estimated_mb"] == 2230.0
-    assert compute._stats["npu_mem"]["context_mb"] == pipeline.ASR_CONTEXT_MB
-    assert compute._stats["npu_mem"]["process_mb"] == 2196.0
-    assert compute._stats["npu_mem"]["delta_mb"] == -35.6
+    assert worker_common._stats["npu_mem"]["estimated_mb"] == 2230.0
+    assert worker_common._stats["npu_mem"]["context_mb"] == npu_ops.ASR_CONTEXT_MB
+    assert worker_common._stats["npu_mem"]["process_mb"] == 2196.0
+    assert worker_common._stats["npu_mem"]["delta_mb"] == -35.6
     snap = compute._asr_snapshot()
     assert snap["npu_mem"]["reserved_mb"] == 1780.0
     assert snap["npu_mem"]["process_mb"] == 2196.0
@@ -594,17 +597,17 @@ def test_sample_asr_mem_records_heartbeat_snapshot(monkeypatch):
 
 def test_sample_npu_mem_uses_tts_budget_and_skips_cpu(monkeypatch):
     """tts 采样传 _last_budget/TTS_CONTEXT_MB；CPU 设备不调 NPU API。"""
-    import pipeline
+    import npu_ops
 
     calls = []
-    monkeypatch.setattr(pipeline, "_last_budget", (9543, 126, 55.1))
-    monkeypatch.setattr(pipeline, "budget_error", lambda: None)
+    monkeypatch.setattr(npu_ops, "_last_budget", (9543, 126, 55.1))
+    monkeypatch.setattr(npu_ops, "budget_error", lambda: None)
     monkeypatch.setattr(
-        pipeline, "npu_mem_estimate",
+        npu_ops, "npu_mem_estimate",
         lambda dev, budget, ctx: calls.append((dev, budget, ctx)) or {
             "reserved_mb": 9500.0, "process_mb": 9683.0,
             "delta_mb": -119.1})
-    monkeypatch.setattr(compute, "_stats", dict(compute._stats))
+    monkeypatch.setattr(worker_common, "_stats", dict(worker_common._stats))
 
     class _Npu:
         device = "npu:0"
@@ -613,8 +616,8 @@ def test_sample_npu_mem_uses_tts_budget_and_skips_cpu(monkeypatch):
         device = "cpu"
 
     compute._sample_npu_mem(_Npu())
-    assert calls == [("npu:0", 9543, pipeline.TTS_CONTEXT_MB)]
-    assert compute._stats["npu_mem"]["process_mb"] == 9683.0
+    assert calls == [("npu:0", 9543, npu_ops.TTS_CONTEXT_MB)]
+    assert worker_common._stats["npu_mem"]["process_mb"] == 9683.0
     compute._sample_npu_mem(_Cpu())
     assert len(calls) == 1
 

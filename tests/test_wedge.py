@@ -8,6 +8,7 @@ import json
 import os
 
 import pytest
+import gateway_obs
 
 import supervisor
 
@@ -156,10 +157,11 @@ def test_sweeper_wiring_resolves_and_runs(fakeredis_client, monkeypatch, tmp_pat
     曾调用不存在的模块级 sweep_inflight，AttributeError 被吞 → sweeper
     从未跑过（重派/取消清扫静默失效）。"""
     import proc_common
+    import redis_transport
     import supervisor
 
     # 符号可解析性（模块级 sweep_inflight 不存在是设计内——方法才是入口）
-    monkeypatch.setattr(proc_common, "_make_redis_client",
+    monkeypatch.setattr(redis_transport, "_make_redis_client",
                         lambda: fakeredis_client)
     q = proc_common.TtsClaimQueue(16, index=45, name="sweep-wire")
     monkeypatch.setattr(supervisor, "_tts_queue", q)
@@ -226,7 +228,7 @@ def test_monitor_step_swallows_exception(monkeypatch):
 
 def test_crash_labels_match_gateway_wtag(monkeypatch):
     """/health crashes 的 key 必须与 gateway 心跳 wtag 同源（gw-N），
-    否则 gateway._worker_row 永远查不到、/metrics 标签分裂。"""
+    否则 gateway_obs._worker_row 永远查不到、/metrics 标签分裂。"""
     monkeypatch.setattr(supervisor, "_crash_total",
                         {("gateway", 0): 2, ("tts", 1): 3})
     monkeypatch.setattr(supervisor, "mailboxes", {})
@@ -290,6 +292,7 @@ def test_check_redis_revives_dead_server(monkeypatch):
     """自愈链④的守护锁定：redis-server 单独死亡（supervisor 存活的窄窗口）
     → 自动重启；队列重置为已知边界（请求 504 兜底）。"""
     import proc_common
+    import redis_transport
     import supervisor
 
     class DeadRedis:
@@ -302,7 +305,7 @@ def test_check_redis_revives_dead_server(monkeypatch):
 
     monkeypatch.setattr(supervisor, "_redis_proc", DeadRedis())
     monkeypatch.setattr(supervisor, "_redis_client", object())
-    monkeypatch.setattr(proc_common, "start_redis_server",
+    monkeypatch.setattr(redis_transport, "start_redis_server",
                         lambda: revived.append(1) or "new-proc")
     supervisor._check_redis()
     assert revived == [1]                 # 自动重启

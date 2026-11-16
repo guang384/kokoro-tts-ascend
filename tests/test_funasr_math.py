@@ -41,13 +41,13 @@ def test_single_group_no_shift(fake_infer):
 # ── 设备解析：坏卡必须 fail-fast，不能被吞成 CPU ──
 
 def test_resolve_funasr_device_propagates_no_npu(monkeypatch):
-    """torch_npu 已加载但无卡：pipeline._resolve_device 的 RuntimeError
+    """torch_npu 已加载但无卡：npu_ops._resolve_device 的 RuntimeError
     必须上抛（ASR 池走退避重试/编排重启），不能静默回落 CPU。"""
-    import pipeline
+    import npu_ops
 
     monkeypatch.setenv("FUNASR_DEVICE", "auto")
     monkeypatch.setattr(
-        pipeline, "_resolve_device",
+        npu_ops, "_resolve_device",
         lambda: (_ for _ in ()).throw(RuntimeError("no usable npu")))
     with pytest.raises(RuntimeError, match="no usable npu"):
         funasr_ts._resolve_funasr_device()
@@ -55,19 +55,19 @@ def test_resolve_funasr_device_propagates_no_npu(monkeypatch):
 
 def test_resolve_funasr_device_auto_prefers_npu(monkeypatch):
     """auto 且有可用 NPU：跟随 pipeline 上卡（不默认 CPU）。"""
-    import pipeline
+    import npu_ops
 
     monkeypatch.setenv("FUNASR_DEVICE", "auto")
-    monkeypatch.setattr(pipeline, "_resolve_device", lambda: "npu:0")
+    monkeypatch.setattr(npu_ops, "_resolve_device", lambda: "npu:0")
     assert funasr_ts._resolve_funasr_device() == "npu:0"
 
 
 def test_resolve_funasr_device_cpu_when_torch_npu_absent(monkeypatch):
     """无 torch_npu 的开发机：pipeline 返回 cpu，ASR 跟随 cpu。"""
-    import pipeline
+    import npu_ops
 
     monkeypatch.setenv("FUNASR_DEVICE", "auto")
-    monkeypatch.setattr(pipeline, "_resolve_device", lambda: "cpu")
+    monkeypatch.setattr(npu_ops, "_resolve_device", lambda: "cpu")
     assert funasr_ts._resolve_funasr_device() == "cpu"
 
 

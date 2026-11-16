@@ -9,7 +9,7 @@ env 走驱动接口仍能报真实卡号。候选生成必须把「显式 ASCEND
 import sys
 import types
 
-import pipeline
+import npu_ops
 
 _SMI_OUT = """\
 | npu-smi 23.0.3                                     Version: 23.0.3                               |
@@ -33,7 +33,7 @@ _SMI_MULTI = """\
 
 
 def _with_smi_output(monkeypatch, out=None, raise_exc=None):
-    """把真实的 pipeline._smi_card_ids 驱动起来（monkeypatch subprocess）——
+    """把真实的 npu_ops._smi_card_ids 驱动起来（monkeypatch subprocess）——
     不再用解析逻辑的复制品：实现漂移时复制品测试照样绿。"""
     import subprocess as sp
 
@@ -50,13 +50,13 @@ def test_smi_parses_chip_ids_and_skips_process_table(monkeypatch):
     """芯片行首列数字+次列型号 → 卡号；Chip 子行（首列无型号）与进程表
     （PID 首列）不误读；解析在进程表处截断。"""
     _with_smi_output(monkeypatch, _SMI_OUT)
-    assert pipeline._smi_card_ids() == [7]
+    assert npu_ops._smi_card_ids() == [7]
 
 
 def test_smi_real_world_variants(monkeypatch):
     """多卡表 + 310P3 / Ascend910A 型号变体 + 进程表截断（中文"不可用"）。"""
     _with_smi_output(monkeypatch, _SMI_MULTI)
-    assert pipeline._smi_card_ids() == [0, 3, 7]
+    assert npu_ops._smi_card_ids() == [0, 3, 7]
 
 
 def test_smi_missing_or_timeout_returns_empty(monkeypatch):
@@ -64,9 +64,9 @@ def test_smi_missing_or_timeout_returns_empty(monkeypatch):
     import subprocess as sp
 
     _with_smi_output(monkeypatch, raise_exc=FileNotFoundError("npu-smi"))
-    assert pipeline._smi_card_ids() == []
+    assert npu_ops._smi_card_ids() == []
     _with_smi_output(monkeypatch, raise_exc=sp.TimeoutExpired(cmd="npu-smi", timeout=10))
-    assert pipeline._smi_card_ids() == []
+    assert npu_ops._smi_card_ids() == []
 
 
 # ── 进程表解析：npu-smi 实测进程内存（process_mb）──
@@ -101,30 +101,30 @@ Process id:968566 Process name:python3 Process memory(MB):2196
 
 
 def test_smi_process_mem_parses_matching_pid():
-    assert pipeline._parse_smi_process_mem(_SMI_PROC, {967120}) == 9683.0
-    assert pipeline._parse_smi_process_mem(_SMI_PROC, {968566}) == 2196.0
+    assert npu_ops._parse_smi_process_mem(_SMI_PROC, {967120}) == 9683.0
+    assert npu_ops._parse_smi_process_mem(_SMI_PROC, {968566}) == 2196.0
 
 
 def test_smi_process_mem_prefers_container_pid_column():
     """新版本带 Process id in container：用容器 PID 匹配，而不是宿主 PID。"""
-    assert pipeline._parse_smi_process_mem(_SMI_PROC_CONTAINER, {2196}) == 9683.0
-    assert pipeline._parse_smi_process_mem(_SMI_PROC_CONTAINER, {967120}) == 9683.0
+    assert npu_ops._parse_smi_process_mem(_SMI_PROC_CONTAINER, {2196}) == 9683.0
+    assert npu_ops._parse_smi_process_mem(_SMI_PROC_CONTAINER, {967120}) == 9683.0
 
 
 def test_smi_process_mem_sums_multi_chip_rows():
-    assert pipeline._parse_smi_process_mem(_SMI_PROC_MULTI, {967120}) == 9683.0
+    assert npu_ops._parse_smi_process_mem(_SMI_PROC_MULTI, {967120}) == 9683.0
 
 
 def test_smi_process_mem_no_memory_column_or_no_match_returns_none():
-    assert pipeline._parse_smi_process_mem(_SMI_PROC_NO_MEM, {967120}) is None
-    assert pipeline._parse_smi_process_mem(_SMI_PROC, {1}) is None
-    assert pipeline._parse_smi_process_mem("", {967120}) is None
+    assert npu_ops._parse_smi_process_mem(_SMI_PROC_NO_MEM, {967120}) is None
+    assert npu_ops._parse_smi_process_mem(_SMI_PROC, {1}) is None
+    assert npu_ops._parse_smi_process_mem("", {967120}) is None
 
 
 def test_smi_proc_mem_short_parser():
-    assert pipeline._parse_smi_proc_mem_short(_SMI_PROC_SHORT, {967120}) == 9683.0
-    assert pipeline._parse_smi_proc_mem_short(_SMI_PROC_SHORT, {968566}) == 2196.0
-    assert pipeline._parse_smi_proc_mem_short(_SMI_PROC_SHORT, {1}) is None
+    assert npu_ops._parse_smi_proc_mem_short(_SMI_PROC_SHORT, {967120}) == 9683.0
+    assert npu_ops._parse_smi_proc_mem_short(_SMI_PROC_SHORT, {968566}) == 2196.0
+    assert npu_ops._parse_smi_proc_mem_short(_SMI_PROC_SHORT, {1}) is None
 
 
 def test_smi_process_mb_cache_and_fallback(monkeypatch):
@@ -139,15 +139,15 @@ def test_smi_process_mb_cache_and_fallback(monkeypatch):
             return "Process id:967120 Process name:python3 Process memory(MB):9683"
         return ""
 
-    monkeypatch.setattr(pipeline, "_run_cmd",
+    monkeypatch.setattr(npu_ops, "_run_cmd",
                         lambda cmd, t, warn="": _run(cmd))
-    monkeypatch.setattr(pipeline, "_pid_candidates", lambda: {967120})
-    monkeypatch.setattr(pipeline, "_SMI_PROC_CACHE",
+    monkeypatch.setattr(npu_ops, "_pid_candidates", lambda: {967120})
+    monkeypatch.setattr(npu_ops, "_SMI_PROC_CACHE",
                         {"ts": 0.0, "pid": None, "dev": None, "mb": None})
-    assert pipeline.smi_process_mb("npu:0") == 9683.0
+    assert npu_ops.smi_process_mb("npu:0") == 9683.0
     assert calls == [("npu-smi", "info"),
                      ("npu-smi", "info", "-t", "proc-mem", "-i", "0")]
-    assert pipeline.smi_process_mb("npu:0") == 9683.0   # 缓存命中
+    assert npu_ops.smi_process_mb("npu:0") == 9683.0   # 缓存命中
     assert len(calls) == 2
 
 
@@ -159,13 +159,13 @@ def test_smi_process_mb_negative_cache(monkeypatch):
         calls.append(tuple(cmd))
         return ""
 
-    monkeypatch.setattr(pipeline, "_run_cmd",
+    monkeypatch.setattr(npu_ops, "_run_cmd",
                         lambda cmd, t, warn="": _run(cmd))
-    monkeypatch.setattr(pipeline, "_pid_candidates", lambda: {967120})
-    monkeypatch.setattr(pipeline, "_SMI_PROC_CACHE",
+    monkeypatch.setattr(npu_ops, "_pid_candidates", lambda: {967120})
+    monkeypatch.setattr(npu_ops, "_SMI_PROC_CACHE",
                         {"ts": 0.0, "pid": None, "dev": None, "mb": None})
-    assert pipeline.smi_process_mb("npu:0") is None
-    assert pipeline.smi_process_mb("npu:0") is None
+    assert npu_ops.smi_process_mb("npu:0") is None
+    assert npu_ops.smi_process_mb("npu:0") is None
     assert len(calls) == 2          # 首轮 info + proc-mem 兜底各一次
 
 
@@ -195,8 +195,8 @@ def test_smi_cards_feed_probe_order(monkeypatch):
     calls = []
     monkeypatch.setitem(sys.modules, "torch", _fake_torch(calls))
     monkeypatch.setenv("ASCEND_DEVICE_ID", "")
-    monkeypatch.setattr(pipeline, "_smi_card_ids", lambda: [7])
-    assert pipeline._pick_npu_device() == "npu:7"
+    monkeypatch.setattr(npu_ops, "_smi_card_ids", lambda: [7])
+    assert npu_ops._pick_npu_device() == "npu:7"
     assert calls == ["npu:0", "npu:7"]           # 枚举先试、smi 兜底
 
 
@@ -217,8 +217,8 @@ def test_multi_card_enumeration_distributes_by_pid(monkeypatch):
     torch_mod = sys.modules["torch"]
     torch_mod.zeros = _ok_zeros
     # smi 报出越界物理卡 7：若它排在枚举前，probe 顺序会先试 7
-    monkeypatch.setattr(pipeline, "_smi_card_ids", lambda: [7])
-    dev = pipeline._pick_npu_device()
+    monkeypatch.setattr(npu_ops, "_smi_card_ids", lambda: [7])
+    dev = npu_ops._pick_npu_device()
     assert dev == f"npu:{_os.getpid() % 2}"      # pid 打散起点生效
     assert calls == [f"npu:{_os.getpid() % 2}"]  # 枚举首个候选即命中
     assert "npu:7" not in calls                  # smi 未抢在枚举前探测
@@ -230,8 +230,8 @@ def test_explicit_id_kept_even_if_out_of_range(monkeypatch):
     calls = []
     monkeypatch.setitem(sys.modules, "torch", _fake_torch(calls))
     monkeypatch.setenv("ASCEND_DEVICE_ID", "7")
-    monkeypatch.setattr(pipeline, "_smi_card_ids", lambda: [])
-    assert pipeline._pick_npu_device() == "npu:7"
+    monkeypatch.setattr(npu_ops, "_smi_card_ids", lambda: [])
+    assert npu_ops._pick_npu_device() == "npu:7"
     assert calls[0] == "npu:7"
 
 
@@ -240,16 +240,16 @@ def test_smi_unavailable_falls_back_to_enumeration(monkeypatch):
     calls = []
     monkeypatch.setitem(sys.modules, "torch", _fake_torch(calls, ok_name="npu:0"))
     monkeypatch.setenv("ASCEND_DEVICE_ID", "")
-    monkeypatch.setattr(pipeline, "_smi_card_ids", lambda: [])
-    assert pipeline._pick_npu_device() == "npu:0"
+    monkeypatch.setattr(npu_ops, "_smi_card_ids", lambda: [])
+    assert npu_ops._pick_npu_device() == "npu:0"
 
 
 def test_all_probes_fail_returns_empty(monkeypatch):
     """全部候选失败 → ""（_resolve_device 走 fail-fast 或 CPU 逃生口）。"""
     monkeypatch.setitem(sys.modules, "torch", _fake_torch([], ok_name=None))
     monkeypatch.setenv("ASCEND_DEVICE_ID", "7")
-    monkeypatch.setattr(pipeline, "_smi_card_ids", lambda: [7])
-    assert pipeline._pick_npu_device() == ""
+    monkeypatch.setattr(npu_ops, "_smi_card_ids", lambda: [7])
+    assert npu_ops._pick_npu_device() == ""
 
 
 # ── vNPU 切分（HAMi）：CANN 枚举缺失（count=0/异常）时不得提前放弃 ──
@@ -267,8 +267,8 @@ def test_count_zero_smi_fallback_still_probes(monkeypatch):
     monkeypatch.setitem(sys.modules, "torch", _fake_torch(calls, count=0))
     monkeypatch.setenv("ASCEND_DEVICE_ID", "")
     _clear_env(monkeypatch)
-    monkeypatch.setattr(pipeline, "_smi_card_ids", lambda: [7])
-    assert pipeline._pick_npu_device() == "npu:7"
+    monkeypatch.setattr(npu_ops, "_smi_card_ids", lambda: [7])
+    assert npu_ops._pick_npu_device() == "npu:7"
     assert calls == ["npu:7"]
 
 
@@ -279,8 +279,8 @@ def test_count_raises_smi_fallback_still_probes(monkeypatch):
                         _fake_torch(calls, count_raises=True))
     monkeypatch.setenv("ASCEND_DEVICE_ID", "")
     _clear_env(monkeypatch)
-    monkeypatch.setattr(pipeline, "_smi_card_ids", lambda: [7])
-    assert pipeline._pick_npu_device() == "npu:7"
+    monkeypatch.setattr(npu_ops, "_smi_card_ids", lambda: [7])
+    assert npu_ops._pick_npu_device() == "npu:7"
 
 
 def test_count_zero_no_driver_candidates_fails_fast(monkeypatch):
@@ -289,8 +289,8 @@ def test_count_zero_no_driver_candidates_fails_fast(monkeypatch):
     monkeypatch.setitem(sys.modules, "torch", _fake_torch(calls, count=0))
     monkeypatch.setenv("ASCEND_DEVICE_ID", "")
     _clear_env(monkeypatch)
-    monkeypatch.setattr(pipeline, "_smi_card_ids", lambda: [])
-    assert pipeline._pick_npu_device() == ""
+    monkeypatch.setattr(npu_ops, "_smi_card_ids", lambda: [])
+    assert npu_ops._pick_npu_device() == ""
     assert calls == []                            # 无候选则一次都不探
 
 
@@ -303,8 +303,8 @@ def test_hami_visible_env_ids_feed_candidates(monkeypatch):
     monkeypatch.setenv("ASCEND_DEVICE_ID", "")
     monkeypatch.setenv("ASCEND_RT_VISIBLE_DEVICES", "4,5")
     monkeypatch.delenv("ASCEND_VISIBLE_DEVICES", raising=False)
-    monkeypatch.setattr(pipeline, "_smi_card_ids", lambda: [])
-    assert pipeline._pick_npu_device() == "npu:4"
+    monkeypatch.setattr(npu_ops, "_smi_card_ids", lambda: [])
+    assert npu_ops._pick_npu_device() == "npu:4"
     assert calls == ["npu:4"]
 
 
@@ -316,6 +316,6 @@ def test_explicit_id_first_at_count_zero(monkeypatch):
     monkeypatch.setenv("ASCEND_DEVICE_ID", "3")
     monkeypatch.setenv("ASCEND_VISIBLE_DEVICES", "5")
     monkeypatch.delenv("ASCEND_RT_VISIBLE_DEVICES", raising=False)
-    monkeypatch.setattr(pipeline, "_smi_card_ids", lambda: [7])
-    assert pipeline._pick_npu_device() == "npu:3"
+    monkeypatch.setattr(npu_ops, "_smi_card_ids", lambda: [7])
+    assert npu_ops._pick_npu_device() == "npu:3"
     assert calls == ["npu:3"]

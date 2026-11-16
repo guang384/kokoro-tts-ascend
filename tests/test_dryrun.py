@@ -13,6 +13,8 @@ import pytest
 
 import compute
 import gateway
+import gateway_state
+import gateway_agg
 import protocol
 from gateway import BizError, TTSRequest, _synth, tts_business
 from g2p import make_chunks
@@ -54,10 +56,11 @@ def pipeline(monkeypatch):
     import fakeredis
 
     import proc_common
+    import redis_transport
 
     server = fakeredis.FakeServer()
     client = fakeredis.FakeStrictRedis(server=server, decode_responses=False)
-    monkeypatch.setattr(proc_common, "_make_redis_client", lambda: client)
+    monkeypatch.setattr(redis_transport, "_make_redis_client", lambda: client)
 
     q = {
         "g2p": FakeQueue(), "tts": proc_common.TtsClaimQueue(
@@ -118,11 +121,11 @@ def pipeline(monkeypatch):
     # asr 工人替身：按名 attach SHM → 恒定时间戳 → 回投
     runners.append(Runner(asr_stub, q["asr"], q["gateways"]).start())
 
-    monkeypatch.setattr(gateway, "_pending", {})
-    monkeypatch.setattr(gateway, "_request_meta", {})
-    monkeypatch.setattr(gateway, "_agg_state", {})
-    monkeypatch.setattr(gateway, "_g2p_queue", q["g2p"])
-    monkeypatch.setattr(gateway, "_entry_wait_s", 10)
+    monkeypatch.setattr(gateway_state, "_pending", {})
+    monkeypatch.setattr(gateway_state, "_request_meta", {})
+    monkeypatch.setattr(gateway_state, "_agg_state", {})
+    monkeypatch.setattr(gateway_state, "_g2p_queue", q["g2p"])
+    monkeypatch.setattr(gateway_state, "_entry_wait_s", 10)
     monkeypatch.setattr(gateway, "_check_voice", lambda voice: None)
     monkeypatch.setattr(gateway, "_asr_ready", lambda: True)
     return q
@@ -166,8 +169,8 @@ def asr_stub(asr_q, gateways):
 
 async def _run_with_pump(coro_factory, result_q):
     """生产路径同款：结果泵线程 + call_soon_threadsafe 回投事件循环。"""
-    gateway._main_loop = asyncio.get_running_loop()
-    pump = threading.Thread(target=gateway._result_pump, args=(result_q,),
+    gateway_state._main_loop = asyncio.get_running_loop()
+    pump = threading.Thread(target=gateway_agg._result_pump, args=(result_q,),
                             daemon=True)
     pump.start()
     return await coro_factory()
@@ -191,7 +194,7 @@ def test_v1_end_to_end_multi_batch(pipeline):
     assert audio[800 + 1440] == round(0.25 * 32767)
     assert audio[-1] == round(0.75 * 32767)
     # 无泄漏
-    assert gateway._agg_state == {} and gateway._request_meta == {}
+    assert gateway_state._agg_state == {} and gateway_state._request_meta == {}
 
 
 def test_v1_end_to_end_fp16_dtype(pipeline):
@@ -229,8 +232,8 @@ def test_tts_end_to_end_with_alignment(pipeline):
     assert d["timestamp"] == [[0, 50], [93, 143], [187, 237],
                               [280, 330], [373, 423], [467, 517]]
     assert d["duration"] > 0.4
-    assert gateway._agg_state == {} and gateway._request_meta == {}
-    assert gateway._pending == {}
+    assert gateway_state._agg_state == {} and gateway_state._request_meta == {}
+    assert gateway_state._pending == {}
 
 
 def test_tts_done_line_stage_fields(pipeline, caplog):
@@ -290,7 +293,7 @@ def test_tts_deadline_shared_across_stages(pipeline, monkeypatch):
 
     slow = SlowStub()
     q["stub"] = slow
-    monkeypatch.setattr(gateway, "_entry_wait_s", 0.3)
+    monkeypatch.setattr(gateway_state, "_entry_wait_s", 0.3)
     q["asr"] = FakeQueue()   # asr 替身消费原队列对象 → 新作业无人消费，fut_ts 永不完成
     t0 = _time.perf_counter()
     with pytest.raises(BizError) as ei:
@@ -303,8 +306,8 @@ def test_tts_deadline_shared_across_stages(pipeline, monkeypatch):
     assert slow.calls == 2, f"音频批次数 {slow.calls}（期望 2）"
     assert 0.20 <= elapsed < 0.45, (
         f"总时长 {elapsed:.3f}s：截止线未共享或音频段未执行")
-    assert gateway._agg_state == {} and gateway._pending == {}
-    assert gateway._request_meta == {}
+    assert gateway_state._agg_state == {} and gateway_state._pending == {}
+    assert gateway_state._request_meta == {}
 
 
 def test_long_request_groups_by_time(pipeline):

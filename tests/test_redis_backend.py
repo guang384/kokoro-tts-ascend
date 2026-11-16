@@ -8,11 +8,12 @@ import time
 import pytest
 
 import proc_common as pc
+import redis_transport
 
 
 @pytest.fixture()
 def q(fakeredis_client, monkeypatch):
-    monkeypatch.setattr(pc, "_make_redis_client", lambda: fakeredis_client)
+    monkeypatch.setattr(redis_transport, "_make_redis_client", lambda: fakeredis_client)
     q = pc.InstrumentedQueue(16, index=50, name="unit")
     yield q
     q.close()
@@ -110,7 +111,7 @@ def test_spawn_pickle_roundtrip(fakeredis_client, monkeypatch):
     q = pc.InstrumentedQueue(16, index=51, name="pk")
     state = pickle.loads(pickle.dumps(pickle.loads(pickle.dumps(q))))
     assert state._key == q._key and state._cap == q._cap
-    monkeypatch.setattr(pc, "_make_redis_client", lambda: fakeredis_client)
+    monkeypatch.setattr(redis_transport, "_make_redis_client", lambda: fakeredis_client)
     q.put_nowait({"spawn": 1})
     assert q.get(timeout=2)["spawn"] == 1
     q.close()
@@ -120,7 +121,7 @@ def test_tts_claim_put_nowait(fakeredis_client, monkeypatch):
     """TtsClaimQueue.put_nowait 回归（20261111 事故）：此类曾缺 put_nowait
     ——ship_batch 派发 asr_job 时 AttributeError 被降级路径吞成 500。
     FakeQueue 有 put_nowait 会掩盖，必须对真类锁定。"""
-    monkeypatch.setattr(pc, "_make_redis_client", lambda: fakeredis_client)
+    monkeypatch.setattr(redis_transport, "_make_redis_client", lambda: fakeredis_client)
     q = pc.TtsClaimQueue(2, index=55, name="pnw")
     q.put_nowait({"req_id": "a", "idx": 0, "ps": "x", "voice": "v",
                   "speed": 1.0, "origin": 0, "need": 1, "text": "t"})
@@ -134,7 +135,7 @@ def test_tts_claim_put_nowait(fakeredis_client, monkeypatch):
 
 def test_cancelled_set_batch_lookup(fakeredis_client, monkeypatch):
     """断连标记批量查询：单次 RTT 返回已取消子集；空集/未取消返回空。"""
-    monkeypatch.setattr(pc, "_make_redis_client", lambda: fakeredis_client)
+    monkeypatch.setattr(redis_transport, "_make_redis_client", lambda: fakeredis_client)
     q = pc.TtsClaimQueue(16, index=51, name="unit-cancel")
     pc.cancel_add("r-gone")
     try:
@@ -166,7 +167,7 @@ def test_external_item_without_stamp_gets_no_qw_ms(q):
 def test_claim_injects_enq_claim_stamps(fakeredis_client, monkeypatch):
     """认领式队列：认领后 chunk 带入队/认领时刻（网关对同请求取
     min/max 得请求级排队跨度），EMA 口径不变。"""
-    monkeypatch.setattr(pc, "_make_redis_client", lambda: fakeredis_client)
+    monkeypatch.setattr(redis_transport, "_make_redis_client", lambda: fakeredis_client)
     q = pc.TtsClaimQueue(16, index=53, name="qw")
     q.put_nowait({"req_id": "a", "idx": 0, "ps": "x", "voice": "v",
                   "speed": 1.0, "origin": 0, "need": 1, "text": "t"})

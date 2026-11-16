@@ -9,6 +9,7 @@ import struct
 import pytest
 
 import protocol
+import redis_transport
 
 
 # ── 校验：非法值必须列出可选值 ──
@@ -50,7 +51,7 @@ def test_claim_dtype_isolation(fakeredis_client, monkeypatch):
     不混批（autocast 整批上下文；混入即错精度执行）。"""
     import proc_common as pc
 
-    monkeypatch.setattr(pc, "_make_redis_client", lambda: fakeredis_client)
+    monkeypatch.setattr(redis_transport, "_make_redis_client", lambda: fakeredis_client)
     q = pc.TtsClaimQueue(64, index=52, name="dtype-iso")
     q.put(_chunk("a0", dtype="fp32"))
     q.put(_chunk("a1", dtype="fp32"))
@@ -70,7 +71,7 @@ def test_member_header_dtype_byte(fakeredis_client, monkeypatch):
     """member 头部第 3 字节编码精度（Lua 类键读它）；序号偏移随之 3:23。"""
     import proc_common as pc
 
-    monkeypatch.setattr(pc, "_make_redis_client", lambda: fakeredis_client)
+    monkeypatch.setattr(redis_transport, "_make_redis_client", lambda: fakeredis_client)
     q = pc.TtsClaimQueue(64, index=53, name="hdr")
     m, _payload, _seq = q._encode(_chunk("x", dtype="fp16"))
     assert struct.unpack(">H", m[:2])[0] == 30        # 长度头不变
@@ -87,7 +88,7 @@ def test_requeue_preserves_fifo_with_dtype(fakeredis_client, monkeypatch):
 
     import proc_common as pc
 
-    monkeypatch.setattr(pc, "_make_redis_client", lambda: fakeredis_client)
+    monkeypatch.setattr(redis_transport, "_make_redis_client", lambda: fakeredis_client)
     q = pc.TtsClaimQueue(64, index=54, name="dtype-fifo")
     q.put(_chunk("ra", dtype="fp32"))
     q.put(_chunk("rb", dtype="fp16"))
@@ -132,7 +133,7 @@ def test_claim_short_member_does_not_break_lua(fakeredis_client, monkeypatch):
     报错 → 每次 claim 都失败 → tts 池永久停摆。兜 0 后由 Python 侧丢弃。"""
     import proc_common as pc
 
-    monkeypatch.setattr(pc, "_make_redis_client", lambda: fakeredis_client)
+    monkeypatch.setattr(redis_transport, "_make_redis_client", lambda: fakeredis_client)
     q = pc.TtsClaimQueue(64, index=57, name="short")
     fakeredis_client.zadd(q._key, {b"\x00": 1})
     assert q.claim(4, "tts-0-1") == []       # 不抛 = worker 活着
@@ -147,7 +148,7 @@ def test_claim_drops_non_dict_payload(fakeredis_client, monkeypatch):
 
     import proc_common as pc
 
-    monkeypatch.setattr(pc, "_make_redis_client", lambda: fakeredis_client)
+    monkeypatch.setattr(redis_transport, "_make_redis_client", lambda: fakeredis_client)
     q = pc.TtsClaimQueue(64, index=55, name="nondict")
     payload = pickle.dumps(["not", "a", "dict"])
     member = struct.pack(">H", 30) + b"\x00" + b"0" * 20 + payload
@@ -165,7 +166,7 @@ def test_sweep_drops_bad_inflight_without_aborting_others(
 
     import proc_common as pc
 
-    monkeypatch.setattr(pc, "_make_redis_client", lambda: fakeredis_client)
+    monkeypatch.setattr(redis_transport, "_make_redis_client", lambda: fakeredis_client)
     q = pc.TtsClaimQueue(64, index=56, name="sweepbad")
     q.put(_chunk("ok", dtype="fp32"))
     assert len(q.claim(4, "tts-0-9")) == 1
@@ -207,7 +208,7 @@ def test_ack_clears_redispatch_counter_offline(fakeredis_client, monkeypatch):
     """ack 成功 = ZREM 成功才 HDEL :ratt；否则慢 worker 晚 ack 会误清。"""
     import proc_common as pc
 
-    monkeypatch.setattr(pc, "_make_redis_client", lambda: fakeredis_client)
+    monkeypatch.setattr(redis_transport, "_make_redis_client", lambda: fakeredis_client)
     q = pc.TtsClaimQueue(64, index=62, name="ack")
     q.put(_chunk("r-ack"))
     m, _c = q.claim(4, "tts-0-321")[0]
@@ -221,7 +222,7 @@ def test_redispatch_max_zero_drops_on_death_path(fakeredis_client, monkeypatch):
     """REDISPATCH_MAX=0 必须与 sweep 一致：死亡主路径也不重派（毒块防护）。"""
     import proc_common as pc
 
-    monkeypatch.setattr(pc, "_make_redis_client", lambda: fakeredis_client)
+    monkeypatch.setattr(redis_transport, "_make_redis_client", lambda: fakeredis_client)
     q = pc.TtsClaimQueue(64, index=63, name="redisp0")
     q.put(_chunk("poison"))
     assert len(q.claim(4, "tts-0-1")) == 1
@@ -233,7 +234,7 @@ def test_claim_mixed_good_bad_cleans_bad_only(fakeredis_client, monkeypatch):
     """好坏混合认领：好 chunk 照常返回，坏 member 从 infl/:ratt 清掉。"""
     import proc_common as pc
 
-    monkeypatch.setattr(pc, "_make_redis_client", lambda: fakeredis_client)
+    monkeypatch.setattr(redis_transport, "_make_redis_client", lambda: fakeredis_client)
     q = pc.TtsClaimQueue(64, index=64, name="mixed")
     q.put(_chunk("ok"))
     bad = b"\x00\x1e\x00" + b"not-a-seq"   # 长度头 30 + dtype 0 + 非法序号
@@ -251,7 +252,7 @@ def test_claim_returns_members_when_bookkeeping_fails(fakeredis_client, monkeypa
     """claim 的 Lua 已成功 → 后置 EMA/计数失败不能把已认领批抛掉。"""
     import proc_common as pc
 
-    monkeypatch.setattr(pc, "_make_redis_client", lambda: fakeredis_client)
+    monkeypatch.setattr(redis_transport, "_make_redis_client", lambda: fakeredis_client)
     q = pc.TtsClaimQueue(64, index=65, name="claim-besteffort")
     q.put(_chunk("ok"))
     monkeypatch.setattr(
@@ -264,7 +265,7 @@ def test_ack_retries_once_after_transient_eval_failure(fakeredis_client, monkeyp
     """ack 第一次 EVAL 失败 → 重试一次（幂等），不把 infl 留给 TTL。"""
     import proc_common as pc
 
-    monkeypatch.setattr(pc, "_make_redis_client", lambda: fakeredis_client)
+    monkeypatch.setattr(redis_transport, "_make_redis_client", lambda: fakeredis_client)
     q = pc.TtsClaimQueue(64, index=66, name="ack-retry")
     q.put(_chunk("r-retry"))
     m, _c = q.claim(4, "tts-0-1")[0]
@@ -283,6 +284,7 @@ def test_ship_batch_routes_chunk_dtype():
 
     import compute
     import proc_common
+    import redis_transport
     from tests.fake_queue import FakeQueue
 
     seen = {}

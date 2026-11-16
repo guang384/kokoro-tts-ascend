@@ -16,13 +16,13 @@ TTS_CHUNK_FIELDS = {"req_id", "idx", "ps", "voice", "speed", "origin",
                     "need", "text", "needs_align", "dtype",
                     "sents"}    # compute.ship_batch（认领式组批；精度类键；
                                 # sents=合并句数——chunk 行展示字段）
-SYNTH_PART_CONSUMER_FIELDS = {"req_id", "need", "block"}              # gateway._agg_add
+SYNTH_PART_CONSUMER_FIELDS = {"req_id", "need", "block"}              # gateway_agg._agg_add
 BLOCK_SEG_FIELDS = {"idx", "offset", "samples", "text"}               # gateway 视图构建
 ASR_JOB_FIELDS = {"type", "req_id", "idx", "origin", "need", "piece",
                   "text", "sample_rate", "max_group_sec"}     # compute.asr_main
 CHUNK_TS_FIELDS = {"type", "req_id", "idx", "need", "samples",
-                   "timestamp", "error"}                       # gateway._on_chunk_ts
-SYNTH_ERROR_CONSUMER_FIELDS = {"req_id", "error", "kind"}             # gateway._on_synth_error
+                   "timestamp", "error"}                       # gateway_agg._on_chunk_ts
+SYNTH_ERROR_CONSUMER_FIELDS = {"req_id", "error", "kind"}             # gateway_agg._on_synth_error
 
 
 def test_chunk_fields_match_consumer():

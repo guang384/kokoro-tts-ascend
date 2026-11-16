@@ -1,6 +1,6 @@
 """g2p 语速感知切句上限（_chunk_cap）：单 chunk 音频 ≲28s 的根因层保证。
 
-asr 组帧数硬封顶（pipeline._asr_auto_budget_mb 预算前提）两层保证的
+asr 组帧数硬封顶（npu_ops._asr_auto_budget_mb 预算前提）两层保证的
 第一层；第二层 funasr_ts._split_part 硬切在 tests/test_funasr_math.py。"""
 import g2p
 

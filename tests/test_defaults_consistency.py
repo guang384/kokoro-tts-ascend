@@ -42,9 +42,10 @@ def test_health_dir_single_source():
     """KOKORO_HEALTH_DIR 只在 proc_common.HEALTH_DIR 解析一次，
     gateway/supervisor 复用同一对象——不会出现两套健康目录。"""
     import gateway
+    import gateway_state
     import supervisor
 
-    assert gateway._health_dir is supervisor.HEALTH_DIR is proc_common.HEALTH_DIR
+    assert gateway_state._health_dir is supervisor.HEALTH_DIR is proc_common.HEALTH_DIR
 
 
 def test_requirements_fakeredis_has_lua():

@@ -12,12 +12,12 @@ int16 波形。
 
 本模块 import torch（batched_model 模块级依赖）——torch 不可安全导入的
 环境（QEMU 仿真：xbyak 段错误）整文件跳过（段错误无法 try/except，只能
-子进程探测；pipeline._torch_import_ok 同款机制）。
+子进程探测；npu_ops._torch_import_ok 同款机制）。
 """
 import numpy as np
 import pytest
 
-from pipeline import _torch_import_ok
+from npu_ops import _torch_import_ok
 
 pytestmark = pytest.mark.skipif(
     not _torch_import_ok(),

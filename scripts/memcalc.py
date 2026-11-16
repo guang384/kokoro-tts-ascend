@@ -13,7 +13,7 @@ initial=512、max_dur=50、style=128、context=512），算子序列与存活集
     T(max) = batch 内最长句的 token 数 × 17.5 ÷ speed_floor
 
 显存构成（FunASR 已独立 asr 池，公式预算见 asr_worker_mb /
-pipeline.prime_asr_memory，随 ASR_MAX_BATCH_SIZE 缩放）：
+npu_ops.prime_asr_memory，随 ASR_MAX_BATCH_SIZE 缩放）：
     常驻：CANN 上下文 450 + KModel 权重 330 + 音色缓存 50 = 830MB
     激活峰值：按算子序列逐段算 shape×4B 取 max（见 peak_activation）
     形状缓存：cache_factor × 激活峰值（池内空闲块库存；因子按探顶校准，
@@ -71,7 +71,7 @@ ALLOC_SLACK = 1.10            # 分配器/工作区余量
 PHYS_SAFETY = 1.02            # npu-smi 未归属到进程的驱动/系统开销余量
 CARD_GB = 64
 
-# ---- asr 池（FunASR MonotonicAligner，与 pipeline._asr_auto_budget_mb 同公式） ----
+# ---- asr 池（FunASR MonotonicAligner，与 npu_ops._asr_auto_budget_mb 同公式） ----
 # 模型维度取自 speech_timestamp_prediction-v1-16k-offline config.yaml：
 # SANMEncoder 30 blocks × hidden 320 × heads 4 × ffn 1280，LFR n=6。
 ASR_RESIDENT_MB = 860         # CANN 450（生产实测常量）+ 权重 160（model.pt 实测
@@ -85,8 +85,8 @@ ASR_MAX_GROUP_SEC = 30.0      # proc_common.ASR_MAX_GROUP_SEC 同源（组时长
                               # g2p._chunk_cap + funasr_ts._split_groups 两层保证）
 # 帧率 100/6 ≈ 16.67 帧/秒（fbank 10ms shift ÷ LFR n=6）。注意必须用
 # `sec * 100 / 6` 而不是 `sec * (100/6)`：后者 30s 会因浮点误差 ceil 成 501，
-# 与 pipeline._asr_auto_budget_mb 的 500 帧预算漂移。
-ASR_CTX_HEADROOM_MB = 256     # pipeline.prime_asr_memory 的 fraction 公式里
+# 与 npu_ops._asr_auto_budget_mb 的 500 帧预算漂移。
+ASR_CTX_HEADROOM_MB = 256     # npu_ops.prime_asr_memory 的 fraction 公式里
                               # 预占之外的对齐/舍入余量（不是物理 ctx 全量）
 ASR_CTX_MB = 450              # asr 进程 CANN 上下文物理值（真机反推：
                               # 进程内存 2226 - 0.98×预算 1782 ≈ 444；取 450）
@@ -96,7 +96,7 @@ def asr_worker_mb(max_batch: int, max_group_sec: float = ASR_MAX_GROUP_SEC,
                   alloc_slack: float = ALLOC_SLACK) -> dict:
     """单 asr worker 总显存（MB）：常驻 860 + 激活×2.2（含形状库存 1.2×）。
 
-    与 pipeline._asr_auto_budget_mb 同 base 公式（双向镜像，改一处必改
+    与 npu_ops._asr_auto_budget_mb 同 base 公式（双向镜像，改一处必改
     另一处）。最坏形状 = 批内全员顶格 30s 组（padded batch 按最长条对齐）。
 
     口径注意：ASR_RESIDENT_MB 里的 CANN 450 是预算帽里的保守预留；
@@ -123,7 +123,7 @@ def physical_mb(budget_mb: float, ctx_mb: float = CONTEXT_MB) -> float:
 
 
 def pipeline_budget_mb(chunk_chars: int, max_batch: int, speed_floor: float) -> int:
-    """运行时实际预算（pipeline._auto_budget_mb 同式）：live×1.15 非 gen
+    """运行时实际预算（npu_ops._auto_budget_mb 同式）：live×1.15 非 gen
     段余量后 ×1.1。共卡核算必须用本式——运行时预占的是它，比
     worker_total_mb（解析 base）多 ~12%，低估会让物理核算失真。"""
     w = worker_total_mb(chunk_chars, max_batch, speed_floor, CACHE_FACTOR_DEFAULT)
@@ -204,7 +204,7 @@ def budget_table(args) -> None:
           f"KModel 330 + 音色缓存 50；FunASR 已独立 asr 池不占此预算；"
           f"含激活 + 形状库存 ×{args.cache_factor} 与分配器余量 ×{ALLOC_SLACK}）")
     print(f"   运行时预算（实际预占）= {rt_budget_mb} MB / {rt_budget_mb / 1024:.2f}GB"
-          f"（与 pipeline._auto_budget_mb 同式，含 1.15 非 gen 段余量）")
+          f"（与 npu_ops._auto_budget_mb 同式，含 1.15 非 gen 段余量）")
     print(f"   ➜ 建议显存预算 = {rt_budget_mb / 1024:.2f}GB（按实际预占口径，"
           f"base {budget_mb}MB 仅作分解参考）")
     # asr 池（同公式族，随 ASR_MAX_BATCH_SIZE 缩放）

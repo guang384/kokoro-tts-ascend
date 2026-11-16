@@ -8,6 +8,8 @@ import time
 
 import pytest
 
+import config
+import heartbeat
 import proc_common
 import supervisor
 from proc_common import BusyWatch
@@ -110,7 +112,7 @@ def test_heartbeat_once_raises_on_write_failure(monkeypatch, tmp_path):
     def _boom(*_a, **_k):
         raise OSError("disk full")
 
-    monkeypatch.setattr(proc_common, "write_heartbeat", _boom)
+    monkeypatch.setattr(heartbeat, "write_heartbeat", _boom)
     with pytest.raises(OSError):
         proc_common._heartbeat_once("tts-0", 1, dict, str(tmp_path))
 
@@ -120,7 +122,7 @@ def test_heartbeat_loop_warns_on_consecutive_failures(monkeypatch, tmp_path, cap
     def _boom(*_a, **_k):
         raise OSError("disk full")
 
-    monkeypatch.setattr(proc_common, "write_heartbeat", _boom)
+    monkeypatch.setattr(heartbeat, "write_heartbeat", _boom)
     stop = threading.Event()
     t = threading.Thread(target=proc_common.heartbeat_loop,
                          args=("tts-9", 424242, dict, str(tmp_path)),
@@ -146,7 +148,7 @@ def test_setup_logging_idempotent(monkeypatch):
     # 清场：剥掉 root handlers 上已有 tag 过滤器，重置单例
     for h in logging.getLogger().handlers:
         h.filters = [f for f in h.filters if not hasattr(f, "tag")]
-    monkeypatch.setattr(proc_common, "_wtag_filter", None)
+    monkeypatch.setattr(config, "_wtag_filter", None)
 
     proc_common.setup_logging("role-a")
     proc_common.setup_logging("role-b")   # g2p 在模块 import 与 main 各调一次

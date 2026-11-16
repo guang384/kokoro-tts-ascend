@@ -7,12 +7,14 @@ from pathlib import Path
 import pytest
 
 import gateway
+import gateway_obs
+import gateway_state
 import supervisor
 
 
 @pytest.fixture(autouse=True)
 def _reset_throttle(monkeypatch):
-    monkeypatch.setattr(gateway, "_health_warn_ts", {})
+    monkeypatch.setattr(gateway_state, "_health_warn_ts", {})
 
 
 # ── 请求文本日志策略（应用方要求：INFO 打完整 TEXT，单行）──
@@ -40,24 +42,24 @@ def test_request_text_newlines_flattened(caplog):
 def test_throttled_warn_once_per_key_per_window(caplog):
     with caplog.at_level(logging.WARNING, logger=gateway.log.name):
         for _ in range(5):   # 模拟监控 5 次连续抓取
-            gateway._throttled_warn("missing:tts 5/6", "missing role: %s", "tts 5/6")
+            gateway_obs._throttled_warn("missing:tts 5/6", "missing role: %s", "tts 5/6")
     assert len([r for r in caplog.records if "missing role" in r.message]) == 1
 
 
 def test_throttled_warn_independent_keys(caplog):
     with caplog.at_level(logging.WARNING, logger=gateway.log.name):
-        gateway._throttled_warn("missing:tts", "missing role: %s", "tts")
-        gateway._throttled_warn("backlog:asr_queue", "queue backlog: %s", "asr_queue")
+        gateway_obs._throttled_warn("missing:tts", "missing role: %s", "tts")
+        gateway_obs._throttled_warn("backlog:asr_queue", "queue backlog: %s", "asr_queue")
     assert len(caplog.records) == 2
 
 
 def test_throttled_warn_rearms_after_window(caplog, monkeypatch):
     monkeypatch.setattr(gateway.time, "time", lambda: 1000.0)
-    gateway._throttled_warn("k", "msg")                       # 首发（caplog 全程抓取）
+    gateway_obs._throttled_warn("k", "msg")                       # 首发（caplog 全程抓取）
     monkeypatch.setattr(gateway.time, "time", lambda: 1061.0)  # 窗口已过 → 重挂
-    gateway._throttled_warn("k", "msg")
+    gateway_obs._throttled_warn("k", "msg")
     monkeypatch.setattr(gateway.time, "time", lambda: 1070.0)  # 窗口内 → 静默
-    gateway._throttled_warn("k", "msg")
+    gateway_obs._throttled_warn("k", "msg")
     assert len([r for r in caplog.records if r.message == "msg"]) == 2
 
 

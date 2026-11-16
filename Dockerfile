@@ -115,7 +115,7 @@ RUN set -eux; \
     test "$(stat -c%s "$D/model.pt")" -gt 150000000
 
 WORKDIR /app
-COPY gateway.py pipeline.py batched_model.py funasr_ts.py supervisor.py g2p.py compute.py proc_common.py protocol.py ./
+COPY gateway.py gateway_state.py gateway_agg.py gateway_obs.py audio_enc.py pipeline.py npu_ops.py batched_model.py funasr_ts.py supervisor.py g2p.py compute.py worker_common.py tts_worker.py asr_worker.py proc_common.py config.py redis_transport.py heartbeat.py protocol.py ./
 # 测试与运维工具随镜像分发（生产机开箱即用：离线回归 / 真机冒烟 / 显存核算）。
 # pytest 为纯轮子安装，QEMU 交叉构建安全（坑仅在 import torch/thinc 的包）；
 # httpx 已含在上方运行依赖（test_tts_api / benchmark 用）

@@ -12,6 +12,7 @@ import time
 import pytest
 
 import proc_common as pc
+import redis_transport
 
 _PORT = 6399
 _IDX = 41          # 键位隔离：不与其他用例的 kokoro:tts 键串扰
@@ -83,7 +84,7 @@ def redis_proc():
 
 @pytest.fixture()
 def cq(redis_proc, monkeypatch):
-    monkeypatch.setattr(pc, "_make_redis_client", lambda: _redis())
+    monkeypatch.setattr(redis_transport, "_make_redis_client", lambda: _redis())
     return pc.TtsClaimQueue(64, index=_IDX)
 
 
@@ -97,7 +98,7 @@ def _claimer_worker(port, results_q, worker_id):
     import redis
 
     r = redis.Redis(host="127.0.0.1", port=port, decode_responses=False)
-    pc._make_redis_client = lambda: r
+    redis_transport._make_redis_client = lambda: r
     q = pc.TtsClaimQueue(64, index=_IDX)
     wid = f"test-{worker_id}-9{worker_id}"   # role-i-pid 形态
     got = []
@@ -143,7 +144,7 @@ def _hold_and_die(holder_q):
     import redis as _r
 
     r = _r.Redis(host="127.0.0.1", port=_PORT, decode_responses=False)
-    pc._make_redis_client = lambda: r
+    redis_transport._make_redis_client = lambda: r
     q = pc.TtsClaimQueue(64, index=_IDX)
     claimed = q.claim(4, "tts-0-999")
     holder_q.put(len(claimed))
@@ -153,7 +154,7 @@ def _hold_and_die(holder_q):
 def test_worker_death_zero_loss_via_requeue(redis_proc, cq, monkeypatch):
     """worker 死亡 → requeue_worker 精确重派（秒级）→ 零永久丢失。
     BRPOPLPUSH 级追踪：重派条件是「worker 已死」而非「TTL 超时」。"""
-    monkeypatch.setattr(pc, "_make_redis_client", lambda: _redis())
+    monkeypatch.setattr(redis_transport, "_make_redis_client", lambda: _redis())
     ctx = mp.get_context("spawn")
 
     for i in range(4):

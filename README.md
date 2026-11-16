@@ -131,6 +131,34 @@ flowchart LR
 redis-server 死亡 → supervisor 自动重启（队列重置，在途请求走超时兜底）；
 客户端断连逐级取消任务（CANCEL 下发，已派发批算完即弃）。
 
+## 代码结构（根目录平铺，按职责分文件）
+
+| 模块 | 职责 |
+|---|---|
+| `supervisor.py` | 容器入口父进程：spawn 四类 worker 池 + 内嵌 redis + 看门狗 |
+| `gateway.py` | FastAPI 入口进程：`/v1/audio/speech` 与 `/tts` 端点、`_synth` 主干、引导 |
+| `gateway_state.py` | 网关全部可变状态与可配常量（测试经它 patch；内部一律 `gst._X` 访问） |
+| `gateway_agg.py` | 聚合引擎：结果泵 + synth_part/chunk_ts 账本 + SHM 块生命周期 |
+| `gateway_obs.py` | 观测面：心跳/僵尸清理、/health 聚合、Prometheus 指标数据面 |
+| `audio_enc.py` | WAV/FLAC/PCM/ffmpeg 编码 + chunk 拼接 |
+| `g2p.py` | g2p 池 worker：切句/音素化/chunk 发布 |
+| `compute.py` | tts/asr 池入口 facade（`tts_main`/`asr_main`，供 supervisor spawn） |
+| `tts_worker.py` / `asr_worker.py` | 两个推理角色的实际实现 |
+| `worker_common.py` | 两角色共享：看门狗/stats 账本/快照骨架/NPU 采样/回投壳 |
+| `pipeline.py` | 文本引擎（G2PEngine）与计算引擎（TTSCompute）+ 单例 |
+| `npu_ops.py` | NPU 运维层：npu-smi 解析、设备发现、显存预算/估算 |
+| `batched_model.py` | KModel 批前向数学（padding 等价性 + 卡上量化） |
+| `funasr_ts.py` | FunASR 词级时间戳封装（批推安全补丁/切组/字符绑定） |
+| `protocol.py` | 跨进程消息契约（唯一事实来源） |
+| `proc_common.py` | 公共件 facade：配置/传输/心跳三层 + BusyWatch/retry_forever/shm_usage |
+| `config.py` | `TUNABLE_PARAMS` 注册表（env 默认值单一来源）+ env 解析 + 日志初始化 |
+| `redis_transport.py` | redis-server 自举、普通/认领两队列、取消标记 |
+| `heartbeat.py` | worker 心跳原子落盘线程 |
+
+约定：跨模块引用可变状态一律经所属模块属性（如 `gateway_state as gst` →
+`gst._pending`）——测试的 monkeypatch 目标即定义模块；facade 模块
+（`gateway.py`/`compute.py`/`proc_common.py`）只做聚合再导出。
+
 ## 构建
 
 镜像内预置权重 + 103 音色（构建走 hf-mirror，运行期完全离线）。
@@ -226,7 +254,7 @@ python -m pytest tests/ -q                                            # 离线�
 docker exec <容器> python -m pytest tests/ -q                          # 镜像内同套
 # 真实 Redis 用例（tests/test_claim_integration.py / test_ipc_crashsafe.py）
 # 会在 6399 端口自起 redis-server；Windows 无该二进制时自动 skip，离线
-# fakeredis 用例仍覆盖 22B 兼容/ack/毒块路径。
+# fakeredis 用例仍覆盖 ack/毒块路径。
 docker exec -e RUN_LIVE_SMOKE=1 <容器> python -m pytest tests/test_tts_api.py -v   # 真机冒烟
 HF_HOME=.hf-cache DEVICE=cpu python tests/validate_batch.py           # 批量一致性数值门（需权重）
 python tests/validate_asr_batch.py                                    # asr 批推数值门：自动选设备（有 NPU 上卡，无卡 CPU）；B 默认取 ASR_MAX_BATCH_SIZE，可传参覆盖；独立进程会额外占卡

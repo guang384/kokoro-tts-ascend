@@ -71,15 +71,15 @@ def _resolve_funasr_device() -> str:
     if explicit and explicit.lower() != "auto":
         return explicit
     # 轻量设备探测（不加载 KModel——asr 池不装 KModel 但 FunASR 仍上卡）。
-    # **只允许 torch_npu 缺失时回落 CPU**：pipeline._resolve_device 在
+    # **只允许 torch_npu 缺失时回落 CPU**：npu_ops._resolve_device 在
     # "torch_npu 已加载但无可用卡"时抛 RuntimeError（fail-fast），裸
     # except Exception 会把它吞成 CPU，让坏卡伪装成健康服务（warm.ok →
     # 网关继续接 /tts，实际对齐在 CPU 上超时）。
     try:
-        import pipeline
+        import npu_ops
     except ImportError:  # 本地开发机无项目模块/依赖：CPU
         return "cpu"
-    dev = pipeline._resolve_device()
+    dev = npu_ops._resolve_device()
     return dev if dev.startswith(("npu", "cuda")) else "cpu"
 
 
@@ -308,7 +308,7 @@ def warmup_batch(max_batch: int, max_group_sec: float = None) -> int:
     合成 max_batch 条 max_group_sec 长度 tone（与生产同形状：24k WAV
     bytes → load_bytes → 16k → T=500 encoder 帧）一次批推——① allocator
     以真峰值形状预热，池一次到位，后续任何批不涨池、npu-smi 恒定；
-    ② pipeline._asr_auto_budget_mb 解析预算的实测校验：热身成功即证明
+    ② npu_ops._asr_auto_budget_mb 解析预算的实测校验：热身成功即证明
     预算 ≥ 实测峰值，reserved 峰值入日志。OOM 阶梯降半重试，取最高
     通过档写 _batch_effective；=1 时与单条路径行为完全一致。任何档位
     都不抛错（批只是优化，可用性优先——与 FUNASR_INPUT auto 回退同
@@ -464,7 +464,7 @@ def _split_groups(parts, texts, sample_rate: int, max_group_sec: float) -> list:
     """按累计时长 ≤ max_group_sec 切组（group_timestamp /
     batch_group_timestamp 共用的分组数学）。
 
-    组帧数硬封顶是 asr 显存预算（pipeline._asr_auto_budget_mb）的前提，
+    组帧数硬封顶是 asr 显存预算（npu_ops._asr_auto_budget_mb）的前提，
     由两层保证：g2p._chunk_cap 语速感知切句（典型路径不超标）+ 本函数
     超长单 part 硬切（_split_part，防御校准偏差）。多 part 也前置判满：
     20s+20s（cap=30）会切成两组，不会组成 40s 组。
@@ -529,7 +529,7 @@ def batch_group_timestamp(job_items, sample_rate: int = 24000,
     与 group_timestamp 同一组切分/偏移拼接数学，差别仅在前向：全部
     job 的组展平后一次批前向（MonotonicAligner 批原生：extract_fbank
     对 list 走 pad_sequence → SANM encoder 一次 padded 批推，见
-    pipeline._asr_auto_budget_mb 的形状推导）。生效批宽 ≤1（热身降级/
+    npu_ops._asr_auto_budget_mb 的形状推导）。生效批宽 ≤1（热身降级/
     未热身）时逐 job 走 group_timestamp——降级路径与降级后同一条代码，
     热身通过的生产路径才走批。组数超过生效档时分桶串推（热身只对
     ≤生效档的形状做过峰值预热，超档形状可能涨池）。

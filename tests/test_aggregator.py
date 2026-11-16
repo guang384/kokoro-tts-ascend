@@ -7,10 +7,13 @@ from multiprocessing import shared_memory
 
 import numpy as np
 import pytest
+import audio_enc
+import gateway_state
 
 import protocol
-from gateway import (_SynthError, _agg_add,
-                     _on_synth_error, _on_synth_part)
+from gateway import _SynthError
+import gateway_agg
+from gateway_agg import _agg_add, _on_synth_error, _on_synth_part
 from tests.fake_queue import FakeQueue
 
 
@@ -19,11 +22,11 @@ def gw(monkeypatch):
     """隔离 gateway 全局状态（聚合/TS 账本均为模块级 dict）。"""
     import gateway
 
-    monkeypatch.setattr(gateway, "_pending", {})
-    monkeypatch.setattr(gateway, "_request_meta", {})
-    monkeypatch.setattr(gateway, "_agg_state", {})
-    monkeypatch.setattr(gateway, "_retired_blocks", {})
-    monkeypatch.setattr(gateway, "_entry_stats",
+    monkeypatch.setattr(gateway_state, "_pending", {})
+    monkeypatch.setattr(gateway_state, "_request_meta", {})
+    monkeypatch.setattr(gateway_state, "_agg_state", {})
+    monkeypatch.setattr(gateway_state, "_retired_blocks", {})
+    monkeypatch.setattr(gateway_state, "_entry_stats",
                         {"requests": 0, "results": 0, "timeouts": 0,
                          "failed": 0, "rejections": 0, "swept": 0,
                          "cancelled": 0, "latency_ms_sum": 0.0})
@@ -73,20 +76,20 @@ def test_synth_part_aggregates_across_batches(gw):
     loop = _loop()
     fut = loop.create_future()
     rid = "r1"
-    gw._pending[("req", rid)] = fut
-    gw._request_meta[rid] = {"needs_align": False, "created": time.time()}
+    gateway_state._pending[("req", rid)] = fut
+    gateway_state._request_meta[rid] = {"needs_align": False, "created": time.time()}
     b1, shm1, a1 = _block([(0, "一"), (1, "二"), (2, "三")])
     b2, shm2, a2 = _block([(3, "四"), (4, "五"), (5, "六")])
     try:
         _on_synth_part(_part(rid, 6, b1))
         assert not fut.done()          # 未收齐不交付
-        assert rid in gw._agg_state
+        assert rid in gateway_state._agg_state
         _on_synth_part(_part(rid, 6, b2))
         assert fut.done() and fut.exception() is None
         r = fut.result()
         assert len(r["blocks"]) == 2 and r["fw"] == 2
         assert r["texts"] == ["一", "二", "三", "四", "五", "六"]
-        assert rid not in gw._agg_state and rid not in gw._request_meta
+        assert rid not in gateway_state._agg_state and rid not in gateway_state._request_meta
     finally:
         shm1.close(); shm1.unlink(); shm2.close(); shm2.unlink()
 
@@ -95,8 +98,8 @@ def test_synth_part_single_batch_delivers_audio(gw):
     loop = _loop()
     fut = loop.create_future()
     rid = "r2"
-    gw._pending[("req", rid)] = fut
-    gw._request_meta[rid] = {"needs_align": False, "created": time.time()}
+    gateway_state._pending[("req", rid)] = fut
+    gateway_state._request_meta[rid] = {"needs_align": False, "created": time.time()}
     b, shm, arrays = _block([(0, "你好")])
     try:
         _on_synth_part(_part(rid, 1, b))
@@ -117,7 +120,7 @@ def test_orphan_part_cleaned_without_state(gw):
     block, shm, _a = _block([(0, "一")])
     try:
         _on_synth_part(_part("ghost", 2, block))
-        assert gw._agg_state == {}
+        assert gateway_state._agg_state == {}
     finally:
         _shm_drop(shm)
 
@@ -128,19 +131,19 @@ def test_concat_failure_not_masked_by_buffererror(gw, monkeypatch):
     真正的故障原因（历史：MemoryError/坏描述符全被报成 BufferError）。"""
     import gateway as gateway_mod
 
-    gw._g2p_queue = FakeQueue()
+    gateway_state._g2p_queue = FakeQueue()
 
     def _boom(_parts):
         raise ValueError("concat boom")
 
-    monkeypatch.setattr(gateway_mod, "_concat", _boom)
+    monkeypatch.setattr(audio_enc, "_concat", _boom)
     b, shm, _a = _block([(0, "一")])
     try:
         async def scenario():
             async def reply():
                 await asyncio.sleep(0.02)  # 等 _synth 注册 Future 并入队
-                rid = next(iter(gateway_mod._pending))[1]
-                gateway_mod._handle_result(_part(rid, 1, b))
+                rid = next(iter(gateway_state._pending))[1]
+                gateway_agg._handle_result(_part(rid, 1, b))
 
             return await asyncio.gather(
                 gateway_mod._synth("文本", "zf_001", 1.0, needs_align=False),
@@ -154,7 +157,7 @@ def test_concat_failure_not_masked_by_buffererror(gw, monkeypatch):
             shm.unlink()
         except Exception:  # noqa: BLE001  gateway 已 unlink 时幂等
             pass
-    assert gw._agg_state == {}
+    assert gateway_state._agg_state == {}
 
 
 # ── 失败终态与 busy ──
@@ -163,14 +166,14 @@ def test_synth_error_kind_mapping(gw):
     """错误分级：invalid_input/compute 两种 kind 都原样带给端点映射。"""
     loop = _loop()
     fut = loop.create_future()
-    gw._pending[("req", "r7")] = fut
+    gateway_state._pending[("req", "r7")] = fut
     _on_synth_error(protocol.synth_error("r7", "不含可发音内容",
                                          protocol.KIND_INVALID))
     assert isinstance(fut.exception(), _SynthError)
     assert fut.exception().kind == protocol.KIND_INVALID
 
     fut2 = loop.create_future()
-    gw._pending[("req", "r8")] = fut2
+    gateway_state._pending[("req", "r8")] = fut2
     _on_synth_error(protocol.synth_error("r8", "前向失败", protocol.KIND_COMPUTE))
     assert fut2.exception().kind == protocol.KIND_COMPUTE
 
@@ -180,14 +183,14 @@ def test_duplicate_terminal_message_is_orphan_safe(gw):
     loop = _loop()
     fut = loop.create_future()
     rid = "r10"
-    gw._pending[("req", rid)] = fut
-    gw._request_meta[rid] = {"needs_align": False, "created": time.time()}
+    gateway_state._pending[("req", rid)] = fut
+    gateway_state._request_meta[rid] = {"needs_align": False, "created": time.time()}
     b, shm, _a = _block([(0, "一")])
     try:
         _on_synth_part(_part(rid, 1, b))
         _on_synth_part(_part(rid, 1, b))  # 迟到的重复：孤儿路径，幂等
         assert fut.result()["fw"] == 1
-        assert gw._agg_state == {}
+        assert gateway_state._agg_state == {}
     finally:
         _shm_drop(shm)
 
@@ -202,12 +205,12 @@ def test_shm_view_release_before_close():
 
 def test_agg_add_clamps_bad_need(gw):
     """need 下限保护：need=0/缺失按 ≥1 处理；给 1 段即完成（不悬挂）。"""
-    gw._request_meta["r11"] = {"needs_align": False, "created": time.time()}
+    gateway_state._request_meta["r11"] = {"needs_align": False, "created": time.time()}
     b, shm, _a = _block([(0, "一")])
     try:
         st, done = _agg_add({"req_id": "r11", "need": 0, "block": b})
         assert done and st["need"] == 1  # 钳到 1：不会因 0 需求产生不可完成的请求
-        assert gw._agg_state == {}
+        assert gateway_state._agg_state == {}
     finally:
         _shm_drop(shm)
 
@@ -216,18 +219,18 @@ def test_agg_add_clamps_bad_need(gw):
 def test_agg_add_dedupes_redispatched_part(gw):
     """重派批幂等：同一 chunk 集二次送达（tts worker 死亡后认领队列精确重派）
     → 重复 part 丢弃并回收其块，绝不重复聚合（否则拼接出重复句）。"""
-    gw._request_meta["r12"] = {"needs_align": False, "created": time.time()}
+    gateway_state._request_meta["r12"] = {"needs_align": False, "created": time.time()}
     b1, shm1, _a = _block([(0, "一")])
     b2, shm2, _a2 = _block([(0, "一")])   # 重派批重投同一 chunk（idx 相同、块名不同）
     try:
         _st, done = _agg_add({"req_id": "r12", "need": 2, "block": b1})
         assert not done  # 未收齐：_agg_add 对未完成恒返回 (None, False)
-        assert gw._agg_state["r12"]["idxs"] == {0}
+        assert gateway_state._agg_state["r12"]["idxs"] == {0}
         # 重派批二次送达同一 chunk（块名不同的重复投递）
         dup = _agg_add({"req_id": "r12", "need": 2, "block": b2})
         assert dup == (None, False), "重复 part 必须被丢弃"
-        assert gw._agg_state["r12"]["blocks"] == [b1], "账本不得混入重复块"
-        assert gw._agg_state["r12"]["idxs"] == {0}
+        assert gateway_state._agg_state["r12"]["blocks"] == [b1], "账本不得混入重复块"
+        assert gateway_state._agg_state["r12"]["idxs"] == {0}
         # 后续新 chunk 正常完成聚合
         b3, shm3, _a3 = _block([(1, "二")])
         try:
@@ -249,8 +252,8 @@ def test_synth_part_timings_max_and_span(gw):
     loop = _loop()
     fut = loop.create_future()
     rid = "r13"
-    gw._pending[("req", rid)] = fut
-    gw._request_meta[rid] = {"needs_align": False, "created": time.time()}
+    gateway_state._pending[("req", rid)] = fut
+    gateway_state._request_meta[rid] = {"needs_align": False, "created": time.time()}
     b1, shm1, _a = _block([(0, "一")])
     b2, shm2, _a2 = _block([(1, "二")])
     b1["segs"][0].update(q_enq=100.0, q_claim=101.0)
@@ -276,8 +279,8 @@ def test_tts_span_first_claim_to_last_forward_done(gw):
     loop = _loop()
     fut = loop.create_future()
     rid = "r-tts-span"
-    gw._pending[("req", rid)] = fut
-    gw._request_meta[rid] = {"needs_align": False, "created": time.time()}
+    gateway_state._pending[("req", rid)] = fut
+    gateway_state._request_meta[rid] = {"needs_align": False, "created": time.time()}
     b, shm, _a = _block([(0, "一"), (1, "二")])
     b["segs"][0].update(q_claim=200.0)
     b["segs"][1].update(q_claim=200.5)
@@ -297,8 +300,8 @@ def test_tts_missing_done_stamp_zero(gw):
     loop = _loop()
     fut = loop.create_future()
     rid = "r-tts-fb"
-    gw._pending[("req", rid)] = fut
-    gw._request_meta[rid] = {"needs_align": False, "created": time.time()}
+    gateway_state._pending[("req", rid)] = fut
+    gateway_state._request_meta[rid] = {"needs_align": False, "created": time.time()}
     b, shm, _a = _block([(0, "一"), (1, "二")])
     b["segs"][0].update(q_claim=200.0)
     b["segs"][1].update(q_claim=201.0)
@@ -316,8 +319,8 @@ def test_q_tts_span_first_enqueue_to_last_claim(gw):
     loop = _loop()
     fut = loop.create_future()
     rid = "r-span"
-    gw._pending[("req", rid)] = fut
-    gw._request_meta[rid] = {"needs_align": False, "created": time.time()}
+    gateway_state._pending[("req", rid)] = fut
+    gateway_state._request_meta[rid] = {"needs_align": False, "created": time.time()}
     b, shm, _a = _block([(0, "一"), (1, "二")])
     b["segs"][0].update(q_enq=100.0, q_claim=101.0)
     b["segs"][1].update(q_enq=100.5, q_claim=101.5)
@@ -330,7 +333,7 @@ def test_q_tts_span_first_enqueue_to_last_claim(gw):
 
 def test_q_tts_span_ignores_duplicate_seg_claim(gw):
     """部分重叠重试：只有 fresh seg 推进跨度，重复 seg 的晚 claim 不拉长。"""
-    gw._request_meta["r-span2"] = {"needs_align": False, "created": time.time()}
+    gateway_state._request_meta["r-span2"] = {"needs_align": False, "created": time.time()}
     b1, shm1, _a = _block([(0, "一")])
     b1["segs"][0].update(q_enq=100.0, q_claim=101.0)
     b2, shm2, _a2 = _block([(0, "一"), (1, "二")])
@@ -339,7 +342,7 @@ def test_q_tts_span_ignores_duplicate_seg_claim(gw):
     try:
         _agg_add({"req_id": "r-span2", "need": 3, "block": b1})
         _agg_add({"req_id": "r-span2", "need": 3, "block": b2})
-        st = gw._agg_state["r-span2"]
+        st = gateway_state._agg_state["r-span2"]
         assert st["t_q_tts_first"] == 100.0
         assert st["t_q_tts_last"] == 103.0            # 105.0 被忽略
     finally:
@@ -352,8 +355,8 @@ def test_synth_part_timings_absent_zero(gw):
     loop = _loop()
     fut = loop.create_future()
     rid = "r14"
-    gw._pending[("req", rid)] = fut
-    gw._request_meta[rid] = {"needs_align": False, "created": time.time()}
+    gateway_state._pending[("req", rid)] = fut
+    gateway_state._request_meta[rid] = {"needs_align": False, "created": time.time()}
     b, shm, _a = _block([(0, "一")])
     try:
         _on_synth_part(_part(rid, 1, b))
@@ -370,8 +373,8 @@ def test_synth_part_duplicate_delivery_no_double_count(gw):
     loop = _loop()
     fut = loop.create_future()
     rid = "r15"
-    gw._pending[("req", rid)] = fut
-    gw._request_meta[rid] = {"needs_align": False, "created": time.time()}
+    gateway_state._pending[("req", rid)] = fut
+    gateway_state._request_meta[rid] = {"needs_align": False, "created": time.time()}
     b1, shm1, _a = _block([(0, "一")])
     b2, shm2, _a2 = _block([(0, "一")])
     b1["segs"][0].update(q_enq=100.0, q_claim=101.0)

@@ -5,6 +5,8 @@ import subprocess as _sp
 import pytest
 
 import gateway
+import gateway_state
+import audio_enc
 import g2p
 from tests import rnd
 
@@ -13,7 +15,7 @@ from tests import rnd
 
 @pytest.fixture()
 def scan_counter(monkeypatch):
-    monkeypatch.setattr(gateway, "_asr_ready_cache", {"ts": 0.0, "val": False})
+    monkeypatch.setattr(gateway_state, "_asr_ready_cache", {"ts": 0.0, "val": False})
     calls = {"n": 0}
 
     def _scan():
@@ -32,7 +34,7 @@ def test_asr_ready_cached_within_ttl(scan_counter):
 
 
 def test_asr_ready_rescans_after_ttl(scan_counter, monkeypatch):
-    monkeypatch.setattr(gateway, "_ASR_READY_TTL_S", 0.0)  # 每次都过期
+    monkeypatch.setattr(gateway_state, "_ASR_READY_TTL_S", 0.0)  # 每次都过期
     assert gateway._asr_ready() is True
     assert gateway._asr_ready() is True
     assert scan_counter["n"] == 2
@@ -96,8 +98,8 @@ def test_encode_ffmpeg_passes_timeout_and_returns_stdout(monkeypatch):
         return _FakeCompleted()
 
     monkeypatch.setattr(gateway.subprocess, "run", _run)
-    out = gateway._encode_ffmpeg(__import__("numpy").zeros(8, "float32"), "mp3")
-    assert out == b"enc" and seen["timeout"] == gateway._ffmpeg_timeout_s
+    out = audio_enc._encode_ffmpeg(__import__("numpy").zeros(8, "float32"), "mp3")
+    assert out == b"enc" and seen["timeout"] == gateway_state._ffmpeg_timeout_s
 
 
 def test_encode_ffmpeg_timeout_raises_runtime(monkeypatch):
@@ -106,7 +108,7 @@ def test_encode_ffmpeg_timeout_raises_runtime(monkeypatch):
 
     monkeypatch.setattr(gateway.subprocess, "run", _run)
     with pytest.raises(RuntimeError, match="编码超时"):
-        gateway._encode_ffmpeg(__import__("numpy").zeros(8, "float32"), "mp3")
+        audio_enc._encode_ffmpeg(__import__("numpy").zeros(8, "float32"), "mp3")
 
 
 if __name__ == "__main__":
