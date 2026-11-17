@@ -22,12 +22,13 @@ arm64 风险单独拉出来：
 import argparse
 import glob
 import os
+import re
 from datetime import datetime
 
 from cpu_e2e import E2E
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-DEFAULT_IMAGE = "kokoro-tts-ascend:npuprep"
+DEFAULT_IMAGE = "kokoro-tts-ascend:npuprep-" + datetime.now().strftime("%Y%m%d")
 PLATFORM = "linux/arm64"
 
 
@@ -75,6 +76,12 @@ class NpuPrep(E2E):
         self.save("image-inspect.txt", out)
         parts = out.strip().split("|")
         arch = parts[0] if parts else ""
+        self.check("镜像 tag 带 8 位日期", bool(re.search(r"20\d{6}", self.image)),
+                   self.image)
+        self.check("IMAGE_VERSION label 带日期",
+                   bool(re.search(r"20\d{6}",
+                                  parts[-1] if parts else "")),
+                   parts[-1] if parts else "")
         self.check("镜像架构 arm64/linux", arch == "arm64", out.strip()[:300])
         self.check("入口为 supervisor.py",
                    "supervisor.py" in (parts[2] if len(parts) > 2 else ""),
@@ -234,7 +241,8 @@ def main():
     ap = argparse.ArgumentParser(description="NPU/ARM 发布前预检")
     ap.add_argument("--image", default=DEFAULT_IMAGE)
     ap.add_argument("--skip-build", action="store_true")
-    ap.add_argument("--version", default="npuprep")
+    ap.add_argument("--version",
+                    default="npuprep-" + datetime.now().strftime("%Y%m%d"))
     args = ap.parse_args()
     prep = NpuPrep(args)
     code = 0 if prep.run() else 1

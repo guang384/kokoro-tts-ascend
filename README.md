@@ -297,9 +297,16 @@ CPU 验证不能替代 arm64/NPU 路径。以下脚本构建**生产 arm64 镜�
 烘入/NPU 预算锚点/采样率守卫），并记录 QEMU 下 torch 是否可导入：
 
 ```bash
-python3 scripts/npu_prep.py                 # 构建 + 预检（不导出 tar）
-python3 scripts/npu_prep.py --skip-build    # 复用已有 arm64 镜像
+# 发布镜像 tag 必须带日期（与 .tmp_build_arm.sh 的 date +%Y%m%d 约定一致）
+TAG=$(date +%Y%m%d)-r8
+docker build --platform linux/arm64 --build-arg IMAGE_VERSION=$TAG \
+  -t kokoro-tts-ascend:$TAG .
+python3 scripts/npu_prep.py --skip-build --image kokoro-tts-ascend:$TAG
+# 或让脚本自己构建（默认 tag = npuprep-YYYYMMDD）
+python3 scripts/npu_prep.py
 ```
+
+`npu_prep.py` 会强制校验镜像 tag 与 `IMAGE_VERSION` label 必须含 8 位日期。
 
 注意：QEMU 下 torch 常因 oneDNN/xbyak 段错误不可用（脚本只记录、不门控）；
 NPU 算子、真机显存预算与吞吐必须在 Ascend 主机上用同一镜像再跑一次
