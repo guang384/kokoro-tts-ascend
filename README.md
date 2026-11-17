@@ -257,6 +257,7 @@ docker exec kokoro-tts python /opt/benchmark.py \
 
 ```bash
 python -m pytest tests/ -q                                            # 离线全套（无模型依赖）
+python -m pyflakes *.py scripts tests                                  # 静态未定义名门禁（同 tests/test_static_analysis.py）
 docker exec <容器> python -m pytest tests/ -q                          # 镜像内同套
 # 真实 Redis 用例（tests/test_claim_integration.py / test_ipc_crashsafe.py）
 # 会在 6399 端口自起 redis-server；Windows 无该二进制时自动 skip，离线

@@ -351,5 +351,3 @@ def _handle_result(res: dict) -> None:
             log.warning("unknown result message type=%r (dropped)", t)
     except Exception:  # noqa: BLE001  单条消息异常不影响服务
         log.exception("result handling error (message dropped): %r", res)
-
-

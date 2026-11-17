@@ -59,7 +59,8 @@ WORKDIR /app
 COPY gateway.py gateway_state.py gateway_agg.py gateway_obs.py audio_enc.py pipeline.py npu_ops.py batched_model.py funasr_ts.py supervisor.py g2p.py compute.py worker_common.py tts_worker.py asr_worker.py proc_common.py config.py redis_transport.py heartbeat.py protocol.py ./
 COPY tests/ tests/
 COPY conftest.py pytest.ini ./
-COPY Dockerfile requirements.txt ./
+# 镜像内 pytest 会读取三个 Dockerfile 与 requirements（打包一致性门禁）。
+COPY Dockerfile Dockerfile.cpu Dockerfile.npuprep requirements.txt ./
 COPY scripts/ scripts/
 RUN ln -sf /app/scripts/benchmark.py /opt/benchmark.py \
     && chmod +x /app/scripts/with_ascend_env.sh

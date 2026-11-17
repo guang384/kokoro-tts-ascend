@@ -121,9 +121,10 @@ COPY gateway.py gateway_state.py gateway_agg.py gateway_obs.py audio_enc.py pipe
 # httpx 已含在上方运行依赖（test_tts_api / benchmark 用）
 COPY tests/ tests/
 COPY conftest.py pytest.ini ./
-# 默认值一致性测试需要读取这两个源文件（tests/test_defaults_consistency.py）；
+# 默认值/打包一致性测试需要读取这些源文件
+# （tests/test_defaults_consistency.py / test_packaging_consistency.py）；
 # 随镜像分发也让运维能直接核对镜像构建配置。
-COPY Dockerfile requirements.txt ./
+COPY Dockerfile Dockerfile.cpu Dockerfile.npuprep requirements.txt ./
 COPY scripts/ scripts/
 RUN ln -sf /app/scripts/benchmark.py /opt/benchmark.py \
     && chmod +x /app/scripts/with_ascend_env.sh

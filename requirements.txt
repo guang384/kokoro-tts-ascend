@@ -21,6 +21,10 @@ espeakng-loader
 funasr==1.4.21
 kaldi-native-fbank
 # pytest 已入镜像（供容器内离线回归）；torch/torch_npu 来自基础镜像，en_core_web_sm 由 Dockerfile 以 wheel 安装
+# pyflakes 同样入镜像：tests/test_static_analysis.py 用它门控未定义名——
+# 模块拆分漏 import 这类故障离线 pytest 抓不到，只有静态检查能提前发现。
+# 纯 Python、无运行时依赖，不影响服务启动。
 prometheus-client>=0.20
 redis>=5
 fakeredis[lua]  # 仅测试：Windows 无 redis-server，单测注入 fakeredis；[lua] 供 claim/ack EVAL
+pyflakes>=3.2

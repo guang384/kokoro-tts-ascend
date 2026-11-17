@@ -61,6 +61,12 @@ async def _lifespan(app: FastAPI):
     yield
     if gst._heartbeat_task is not None:
         gst._heartbeat_task.cancel()
+        try:
+            # 等取消落地再关循环：只 cancel 不 await 会留下 pending task，
+            # 关闭事件循环时刷 "Task was destroyed but it is pending"。
+            await gst._heartbeat_task
+        except asyncio.CancelledError:
+            pass
     try:  # 摘掉自己的心跳文件，聚合视图立即少一个 worker
         os.unlink(os.path.join(gst._health_dir, f"worker-{os.getpid()}.json"))
     except OSError:

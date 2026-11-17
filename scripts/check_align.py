@@ -125,4 +125,3 @@ if STRICT:
             print(f"  FAIL  {p}")
         sys.exit(1)
     print("  PASS  结构/能量/段数契约全部通过")
-

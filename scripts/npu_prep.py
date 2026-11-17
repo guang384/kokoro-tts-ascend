@@ -6,9 +6,10 @@ arm64 风险单独拉出来：
   - 生产 Dockerfile 的 arm64 镜像构建（无 torch import，QEMU 安全）
   - 镜像 Config.Env 全量 TUNABLE 默认值 + 底座遗留业务 env 检查
   - /app 模块清单与仓库根模块一致（拆分后新文件不能漏 COPY）
-  - compileall / 19 个模块 import（不含 batched_model：torch 在 QEMU 下可能段错误）
+  - compileall / 全部非 torch 模块 import（清单见 IMPORT_MODULES；batched_model
+    模块级 import torch，QEMU 下可能段错误，故排除）
   - arm64 镜像内 pytest（排除需 in-process torch / 真实 redis 多进程的用例）
-  - 依赖版本（funasr 1.4.21 / kokoro 0.9.4 / pypinyin 0.55.0）与 pip check
+  - 依赖版本（requirements.txt 精确钉住的 RELEASE_PINS）与 pip check
   - 模型资产已烘入镜像（Kokoro voice、FunASR model.pt）
   - NPU 预算公式锚点 / DEVICE=cpu 解析 / KOKORO_SAMPLE_RATE 启动守卫
   - torch 子进程探测：记录 QEMU 是否可 import torch（不可则明确标注，
@@ -43,6 +44,33 @@ BUSINESS_ENV_PREFIXES = ("KOKORO_", "TTS_", "ASR_", "G2P_", "GATEWAY_",
 # 部署/内部注入变量：不属于 TUNABLE_PARAMS，但允许出现在镜像 env 中。
 KNOWN_EXTRA_ENV = {"FUNASR_MODEL_DIR", "KOKORO_HEALTH_DIR",
                    "WORKER_TAG", "WORKER_IDX", "IMAGE_VERSION"}
+
+# arm64 import 冒烟清单：除 batched_model（模块级 import torch，QEMU 下可能
+# 段错误）外的全部运行时模块。test_packaging_consistency 保证它与仓库根
+# 模块清单一致——新增模块漏加时测试失败，不必等发布预检才发现。
+IMPORT_MODULES = ("gateway", "gateway_state", "gateway_agg", "gateway_obs",
+                  "audio_enc", "pipeline", "npu_ops", "funasr_ts",
+                  "supervisor", "g2p", "compute", "worker_common",
+                  "tts_worker", "asr_worker", "proc_common", "config",
+                  "redis_transport", "heartbeat", "protocol")
+
+# 发布必须精确钉住的依赖：版本从 requirements.txt 解析，避免预检脚本与
+# 安装清单各写一份字面量后漂移（改 requirements 而忘改预检 = 门禁失真）。
+RELEASE_PINS = ("funasr", "kokoro", "pypinyin")
+
+
+def _pinned_versions(text: str) -> dict:
+    """从 requirements.txt 文本解析 `name==version` 精确钉版（忽略注释/额外索引）。
+
+    只认裸包名：`misaki[zh]==0.9.4` 这类 extras 形式不参与发布门禁。
+    """
+    pins = {}
+    for line in text.splitlines():
+        line = line.split("#", 1)[0].strip()
+        m = re.fullmatch(r"([A-Za-z0-9_.-]+)\s*==\s*([^\s;]+)", line)
+        if m:
+            pins[m.group(1).lower()] = m.group(2)
+    return pins
 
 
 def _docker_env_map(text: str) -> dict:
@@ -207,30 +235,32 @@ class NpuPrep(E2E):
         rc, out = self.armrun("python", "-m", "compileall", "-q", "/app", timeout=900)
         self.check("arm64 镜像 python compileall", rc == 0, out[-300:])
 
-        # 4) 模块 import（排除 batched_model：模块级 import torch）
-        mods = [m for m in ("gateway", "gateway_state", "gateway_agg", "gateway_obs",
-                            "audio_enc", "pipeline", "npu_ops", "funasr_ts",
-                            "supervisor", "g2p", "compute", "worker_common",
-                            "tts_worker", "asr_worker", "proc_common", "config",
-                            "redis_transport", "heartbeat", "protocol")
-                if f"{m}.py" in host_mods]
+        # 4) 模块 import（清单单一来源；batched_model 模块级 import torch 被排除）
+        mods = [m for m in IMPORT_MODULES if f"{m}.py" in host_mods]
         rc, out = self.armrun("python", "-c",
                               "import " + ", ".join(mods) + "; print('imports ok')",
                               timeout=900)
         self.save("arm64-import-smoke.txt", out)
-        self.check("arm64 19 模块 import（不含 torch 模块）", rc == 0 and "imports ok" in out,
-                   out.strip()[-300:])
+        self.check(f"arm64 {len(mods)} 模块 import（不含 torch 模块）",
+                   rc == 0 and "imports ok" in out, out.strip()[-300:])
 
-        # 5) 依赖版本 / pip check
+        # 5) 依赖版本 / pip check（期望值来自 requirements.txt，不写死）
         rc, out = self.armrun(
             "python", "-c",
             "from importlib.metadata import version as v;"
             "print('funasr',v('funasr'));print('kokoro',v('kokoro'));"
             "print('pypinyin',v('pypinyin'));print('redis',v('redis'))", timeout=300)
         self.save("arm64-versions.txt", out)
-        self.check("关键依赖版本钉住",
-                   "funasr 1.4.21" in out and "kokoro 0.9.4" in out
-                   and "pypinyin 0.55.0" in out, out.strip())
+        req_text = open(os.path.join(ROOT, "requirements.txt"),
+                        encoding="utf-8").read()
+        pins = _pinned_versions(req_text)
+        missing_pins = [n for n in RELEASE_PINS if n not in pins]
+        self.check("requirements.txt 精确钉住发布依赖", not missing_pins,
+                   f"missing={missing_pins}")
+        self.check("关键依赖版本与 requirements.txt 一致",
+                   not missing_pins
+                   and all(f"{n} {pins[n]}" in out for n in RELEASE_PINS),
+                   out.strip())
         rc, out = self.armrun("pip", "check", timeout=600)
         self.save("arm64-pip-check.txt", out)
         # 华为基底自带 mindstudio/ms-service-profiler 等工具链的缺失依赖与

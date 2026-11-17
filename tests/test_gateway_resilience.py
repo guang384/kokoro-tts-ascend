@@ -216,4 +216,3 @@ def test_body_limit_drains_request_before_413():
     start = next(m for m in sent if m["type"] == "http.response.start")
     assert start["status"] == 413
     assert len(received) == 3 and chunks == []      # body 已读到结束
-

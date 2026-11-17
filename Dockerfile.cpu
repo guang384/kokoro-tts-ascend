@@ -72,9 +72,9 @@ WORKDIR /app
 COPY gateway.py gateway_state.py gateway_agg.py gateway_obs.py audio_enc.py pipeline.py npu_ops.py batched_model.py funasr_ts.py supervisor.py g2p.py compute.py worker_common.py tts_worker.py asr_worker.py proc_common.py config.py redis_transport.py heartbeat.py protocol.py ./
 COPY tests/ tests/
 COPY conftest.py pytest.ini ./
-# tests/test_defaults_consistency.py 读取生产 Dockerfile 与 requirements；
-# 一并复制使镜像内 pytest 与生产镜像语义一致。
-COPY Dockerfile requirements.txt ./
+# tests/test_defaults_consistency.py / test_packaging_consistency.py 读取
+# 三个 Dockerfile 与 requirements；一并复制使镜像内 pytest 与仓库一致。
+COPY Dockerfile Dockerfile.cpu Dockerfile.npuprep requirements.txt ./
 COPY scripts/ scripts/
 RUN ln -sf /app/scripts/benchmark.py /opt/benchmark.py \
     && chmod +x /app/scripts/with_ascend_env.sh
