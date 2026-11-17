@@ -241,6 +241,40 @@ q_asr 排队 EMA 上来就 `ASR_WORKERS`+1 或 `ASR_MAX_BATCH_SIZE`+，线性模
 | realtime 不涨、p95 恶化 | NPU 饱和，停手 |
 | ASR chunk 行 `queue_ms` 持续走高（或 `/metrics` 的 `queue_avg_wait_ms{stage=asr}`） | `ASR_WORKERS`+1（B8 每 worker 预算 ~2.7GB / npu-smi ~3.1GB）或 `ASR_MAX_BATCH_SIZE` 上调 |
 
+### 压测步骤（找单卡拐点）
+
+工具：镜像内 `/opt/benchmark.py`（即仓库 `scripts/benchmark.py`，容器内自带；
+宿主机直接跑需 `pip install httpx`）。脚本自带预热：先 GET `/health` 再发
+一条单请求，失败即退出。
+
+1. 逐级加压：`-c 1,2,4,8` 起步，`-n 32`（每档总请求数 ≥ 文本条数，保证互异
+   文本轮转打穿 g2p 缓存）；
+2. 判拐点：`req/s` 不再随并发线性涨、`p95` 明显恶化 → 回退一档收敛；
+   `realtime` 不再涨且 `p95` 恶化 → NPU 已饱和，停手；
+3. 精化：拐点附近加密档位复测（如 `-c 5,6,7,10,12`）；
+4. 复核：以生产预期形态复测——真实语料（`--text-file`）、生产语速（`--speed`，
+   探显存上界用 0.5）、预期端点（对外只暴露 `/v1` 就压 `speech`，含时间戳
+   业务就压 `tts`——`/tts` 含 ASR 对齐路径，吞吐自然低于 `/v1`）。
+
+### 参数速查
+
+| 参数 | 说明 |
+|---|---|
+| `--endpoint` | `speech` = OpenAI 兼容 `/v1/audio/speech`（默认）；`tts` = 业务接口（含 ASR 对齐） |
+| `-c` / `-n` | 并发档位（逗号分隔，逐级抬升）/ 每档总请求数 |
+| `--random N` | N 条互异词表随机文本轮转（打穿 g2p 缓存） |
+| `--text-file PATH` | 从自备 txt 文档随机摘录（随机位置×分层随机长度，UTF-8/GBK 自适应；文档须可读、非空、≥ `--max-chars` 字，否则启动即报错） |
+| `--max-chars N` | 摘录/超长层长度上限（默认 800；文档偏短时调低） |
+| `--speed` / `--speed-mix` | 语速 / 按请求轮转的混合语速（如 `0.8,1.0,1.0,1.5`，测批内速度分桶影响） |
+| `--format` | `wav`/`pcm`（直编）或 `mp3`/`flac`（含 ffmpeg/编码开销） |
+| `--keepalive` | 复用连接测竞态（默认每请求新建连接，规避 keep-alive 关闭竞态） |
+
+### 指标口径
+
+`req/s` = 完成请求数/秒；`realtime` = 聚合倍速 Σ音频时长/墙钟（>1 即快于实时）；
+`chars/s` = 合成字符吞吐；`mean`/`p95` = 请求延迟（p95 用最近邻秩法，小样本不偏乐观）。
+延迟只计服务端处理（信号量获取后计时），不含客户端排队。
+
 ```bash
 # 随机长短混合文本（必须：固定文本会命中 g2p 缓存虚高）
 docker exec kokoro-tts python /opt/benchmark.py \
@@ -253,6 +287,10 @@ docker cp corpus.txt kokoro-tts:/tmp/corpus.txt
 docker exec kokoro-tts python /opt/benchmark.py \
   --url http://127.0.0.1:5174 --endpoint tts -c 1,2,4,8 -n 32 --text-file /tmp/corpus.txt
 ```
+
+多配置矩阵批量压测（不同 worker/批宽组合在真机批量跑、结果落当前目录）：
+`scripts/bench_matrix.sh [CARD] [IMAGE]`（真机 root shell 执行，IMAGE 必填
+日期 tag）。
 
 显存核算（两池共居 + 吞吐档参考）：`python scripts/memcalc.py --max-batch <B> --card-gb <容量> --workers <N> --asr-workers <N>`；
 `python scripts/memcalc.py --profiles` 打印 64GB 卡吞吐档表（旧基线 6×B4=24u ~40GB →
