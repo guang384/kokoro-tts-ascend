@@ -266,6 +266,43 @@ python scripts/parity_smoke.py                          # 故障注入冒烟（�
 # 生产事故都出在这个无 mock 覆盖的路径）
 ```
 
+## CPU 端到端验证（x86 Docker，无需 NPU）
+
+生产镜像为 arm64 Ascend 基底，x86 QEMU 下 `import torch` 会段错误，不能作为 CPU
+运行载体。CPU 验证走独立的 `Dockerfile.cpu`（原生 x86 + CPU torch），模型资产
+从现有 arm64 镜像提取后只读挂载（`docker cp` 不执行镜像代码）：
+
+```bash
+# 0) 前置：WSL Docker 可用；本机已有 kokoro-tts-ascend 镜像（或桌面 .tar.gz）
+bash scripts/extract_cpu_assets.sh                       # 默认 --image kokoro-tts-ascend:latest
+#    缺镜像但有导出包：bash scripts/extract_cpu_assets.sh --tar /mnt/c/.../kokoro-tts-ascend-YYYYMMDD.tar.gz
+
+# 1) 构建 CPU 镜像（torch CPU 轮子约 2-3GB；源不可达可 --build-arg PYTHON_IMAGE=pytorch/pytorch:2.15.0-cpu）
+docker build -f Dockerfile.cpu -t kokoro-tts-cpu:local .
+
+# 2) 全量验证（构建 + 镜像内 pytest + 真实模型功能/数值门 + 故障注入）
+python3 scripts/cpu_e2e.py --assets cpu-e2e-assets
+#    分阶段：--phases baseline,numeric / --skip-build / --keep
+```
+
+`scripts/cpu_e2e.py` 的 gate：
+
+| 阶段 | 内容 |
+|---|---|
+| `build` | 构建 CPU 镜像；`import torch/kokoro/funasr` 冒烟 |
+| `pytest` | 镜像内 `pytest tests/ -q -rs`；只允许 7 个环境门控 skip（5 live smoke + 2 real forward），真实 redis 用例必须执行 |
+| `baseline` | 真实模型起 supervisor：`/health` starting→ok、双端点、WAV/PCM/FLAC/MP3、多批 `X-Batch-Size>1`、`/tts` 字级时间戳（段数=可对齐字符数）、`check_align --strict`、`test_tts_api.py`、`verify_boundaries.py` |
+| `numeric` | `validate_batch.py`、`validate_asr_batch.py`、`RUN_REAL_FORWARD=1 test_real_forward.py` |
+| `fault` | `parity_smoke.py`（多网关/断连/杀 tts 重派）、SO_REUSEPORT 双进程分流、kill 内嵌 redis 自愈、ASR 未就绪 503→恢复、SHM 孤儿清扫、优雅退出、429×3（queue_full/wait_budget/shm_pressure）、504、499 |
+| `report` | `artifacts/cpu-e2e-<ts>/summary.{json,md}` + 日志/指标/tts.json/pytest.xml |
+
+CPU 模式关键 env（驱动已内置）：`DEVICE=cpu`、`FUNASR_DEVICE=cpu`、
+`ASR_MAX_BATCH_SIZE=1`（缩短 30s×B 热身）、`SPAWN_READY_TIMEOUT_S=0`、
+`STUCK_KILL_S=1800`（CPU 加载慢）、`WEDGE_RESTART_S=0`（故障注入期间不退出）。
+预期耗时：构建 5-15 分钟，完整 E2E 30-60 分钟。模型资产与 `artifacts/` 已在
+`.gitignore`/`.dockerignore` 中排除。若 CPU torch 源不可达，构建日志会给出
+fallback 基底；模型资产缺失时 `extract_cpu_assets.sh` 会明确报错。
+
 ## 配置（启动时全部打印实际值，清单单一来源 `proc_common.TUNABLE_PARAMS`）
 
 | 变量 | 默认 | 说明 |

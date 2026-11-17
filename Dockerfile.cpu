@@ -1,0 +1,87 @@
+# =====================================================================
+# CPU 端到端验证镜像（x86_64，非生产镜像）
+#
+# 生产镜像基于 Ascend torch-npu arm64 基底；x86 QEMU 下 import torch 会
+# 触发 oneDNN/xbyak 段错误（见 Dockerfile 注释），无法作为运行载体。
+# 本文件用原生 x86 + CPU torch 构建同一套代码，配合：
+#   scripts/extract_cpu_assets.sh   从现有 arm64 镜像提取模型资产
+#   scripts/cpu_e2e.py              分阶段功能/故障/数值验证
+# 模型资产不烤进镜像，运行期 -v 挂载到 /opt/hf-cache 与 /opt/funasr-models。
+#
+# 构建：
+#   docker build -f Dockerfile.cpu -t kokoro-tts-cpu:local .
+# 若 PyTorch CPU 源不可达，可改用官方 CPU 基底并去掉 torch 安装层：
+#   --build-arg PYTHON_IMAGE=pytorch/pytorch:2.15.0-cpu
+# =====================================================================
+ARG PYTHON_IMAGE=python:3.12-slim
+FROM ${PYTHON_IMAGE}
+
+ARG PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/
+ARG TORCH_CPU_INDEX=https://download.pytorch.org/whl/cpu
+# 与本机已通过全量 pytest 的 CPU venv 对齐（torch 2.15.0+cpu，无 torchaudio）；
+# transformers 5.x 要求 torch>=2.6，2.5.1 会被禁用。数值门会再次验证。
+ARG TORCH_VERSION=2.15.0
+ARG IMAGE_VERSION=dev
+
+ENV PIP_INDEX_URL=${PIP_INDEX_URL} \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PYTHONUNBUFFERED=1 \
+    PYTHONPATH=/app \
+    HF_HOME=/opt/hf-cache \
+    HF_HUB_OFFLINE=1 \
+    KOKORO_MODEL_ID=hexgrad/Kokoro-82M-v1.1-zh \
+    KOKORO_SAMPLE_RATE=24000 \
+    KOKORO_VOICE=zf_001 \
+    FUNASR_MODEL_DIR=/opt/funasr-models/timestamp-v1 \
+    DEVICE=cpu \
+    FUNASR_DEVICE=cpu \
+    PORT=5174 \
+    LOG_LEVEL=INFO
+
+LABEL org.opencontainers.image.title="kokoro-tts-cpu-e2e" \
+      org.opencontainers.image.version=${IMAGE_VERSION} \
+      org.opencontainers.image.torch-version=${TORCH_VERSION}+cpu
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        espeak-ng ffmpeg curl redis-server iproute2 libsndfile1 libgomp1 \
+        ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# CPU torch 先装：requirements 里的 kokoro/funasr 会声明 torch 依赖，
+# 已满足后 pip 不会换成 CUDA 版本。extra-index 的 +cpu 版本号高于 PyPI
+# 同版（local version），优先被选中；源不可达时退回 PyPI 版本（可用但
+# 体积大）。funasr 1.4.21 不依赖 torchaudio（本机验证），故不安装。
+RUN pip install --no-cache-dir \
+        --extra-index-url "${TORCH_CPU_INDEX}" \
+        "torch==${TORCH_VERSION}" \
+    && python -c "import torch; print('torch', torch.__version__, 'cuda', torch.cuda.is_available())"
+
+COPY requirements.txt /tmp/requirements.txt
+RUN pip install --no-cache-dir -r /tmp/requirements.txt \
+    && pip install --no-cache-dir pytest "fakeredis[lua]" \
+    && rm -f /tmp/requirements.txt
+
+# en_core_web_sm 是 py3-none-any wheel，与架构无关；pip 装元数据不会
+# import spacy/torch（QEMU 坑无关，本镜像原生 x86）。
+COPY wheels/en_core_web_sm-3.8.0-py3-none-any.whl /tmp/
+RUN pip install --no-cache-dir /tmp/en_core_web_sm-3.8.0-py3-none-any.whl \
+    && python -c "from importlib.metadata import version; assert version('en_core_web_sm') == '3.8.0'" \
+    && rm -f /tmp/en_core_web_sm-3.8.0-py3-none-any.whl
+
+WORKDIR /app
+COPY gateway.py gateway_state.py gateway_agg.py gateway_obs.py audio_enc.py pipeline.py npu_ops.py batched_model.py funasr_ts.py supervisor.py g2p.py compute.py worker_common.py tts_worker.py asr_worker.py proc_common.py config.py redis_transport.py heartbeat.py protocol.py ./
+COPY tests/ tests/
+COPY conftest.py pytest.ini ./
+# tests/test_defaults_consistency.py 读取生产 Dockerfile 与 requirements；
+# 一并复制使镜像内 pytest 与生产镜像语义一致。
+COPY Dockerfile requirements.txt ./
+COPY scripts/ scripts/
+RUN ln -sf /app/scripts/benchmark.py /opt/benchmark.py \
+    && chmod +x /app/scripts/with_ascend_env.sh
+
+EXPOSE 5174
+# CPU 模型加载 + FunASR 热身比真机慢，start-period 放宽到 15 分钟。
+HEALTHCHECK --interval=30s --timeout=5s --start-period=900s --retries=5 \
+    CMD curl -fsS "http://127.0.0.1:${PORT}/health" || exit 1
+
+CMD ["python3", "supervisor.py"]

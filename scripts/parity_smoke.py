@@ -4,6 +4,8 @@
 平台：Linux 走 SO_REUSEPORT 共享 PORT；Windows 每网关 PORT+1000+i。
 前提（真机/容器内均可，CPU 亦可）：
     PORT=5200 GATEWAY_WORKERS=2 TTS_WORKERS>=2 ASR_WORKERS>=1     WAIT_TIMEOUT_S=30 已按此启动服务（Windows 网关端口 = PORT+1000+i）
+    CPU 上单次前向慢：可设 PARITY_CONCURRENCY=4、PARITY_ABANDON_REPEAT=4、
+    WAIT_TIMEOUT_S=120 缩短杀 tts 并发与断连长文本，语义不变。
 用法：
     python scripts/parity_smoke.py            # 全部 6 项
 判读：总结行全 ✓ 为通过；"杀 tts 后请求存活" 是 at-least-once 重派的
@@ -29,6 +31,9 @@ else:
     # Linux 生产：双网关 SO_REUSEPORT 共享同一端口，内核按四元组哈希分发
     GW = [f"http://127.0.0.1:{PORT}", f"http://127.0.0.1:{PORT}"]
 HB_DIR = os.getenv("KOKORO_HEALTH_DIR", "/tmp/kokoro-health")
+# CPU 慢机可调小，避免 16×慢前向把 WAIT_TIMEOUT 吃满；默认保持开发机口径。
+N_CONCURRENCY = max(1, int(os.getenv("PARITY_CONCURRENCY", "16")))
+ABANDON_REPEAT = max(1, int(os.getenv("PARITY_ABANDON_REPEAT", "60")))
 results = []
 
 
@@ -67,9 +72,15 @@ for gw in GW:
 check("双网关均服务 /v1", ok1)
 
 # ── 2. 跨网关 e2e 聚合（/metrics 在任一网关读都是两网关之和）──
-mt0 = get(GW[1], "/metrics")
-r0 = metric(mt0, "kokoro_e2e_requests_total")
-s0 = metric(mt0, "kokoro_e2e_successes_total")
+# 心跳 5s 一刷：刚返回的请求在 /metrics 里可能还没落盘，重试至多 15s。
+r0 = s0 = None
+for _ in range(15):
+    mt0 = get(GW[1], "/metrics")
+    r0 = metric(mt0, "kokoro_e2e_requests_total")
+    s0 = metric(mt0, "kokoro_e2e_successes_total")
+    if (r0 or 0) >= 2 and (s0 or 0) >= 2:
+        break
+    time.sleep(1)
 check("跨网关 e2e 聚合", r0 is not None and r0 >= 2 and s0 >= 2,
       f"requests={r0} successes={s0}（含两网关请求）")
 
@@ -79,7 +90,8 @@ check("跨网关 e2e 聚合", r0 is not None and r0 >= 2 and s0 >= 2,
 def abandon():
     try:
         post(GW[0], "/v1/audio/speech",
-             {"input": "长文本断连验证。" * 60, "voice": "zf_001"}, timeout=1)
+             {"input": "长文本断连验证。" * ABANDON_REPEAT, "voice": "zf_001"},
+             timeout=1)
     except Exception:
         pass  # 主动断开
 
@@ -134,7 +146,7 @@ def worker(i):
             outcomes.append(str(type(e).__name__))
 
 
-threads = [threading.Thread(target=worker, args=(i,)) for i in range(16)]
+threads = [threading.Thread(target=worker, args=(i,)) for i in range(N_CONCURRENCY)]
 for th in threads:
     th.start()
 time.sleep(2.5)  # 负载进行中杀
@@ -148,8 +160,10 @@ for th in threads:
 
 succ = sum(1 for o in outcomes if o == 200)
 to = sum(1 for o in outcomes if o == "TimeoutError" or o == 504)
-check("杀 tts 后请求存活（重派）", succ >= 14,
-      f"success={succ}/16 timeout={to} other={[o for o in outcomes if o != 200 and 'Timeout' not in str(o)]}")
+threshold = max(1, N_CONCURRENCY - 2)
+check("杀 tts 后请求存活（重派）", succ >= threshold,
+      f"success={succ}/{N_CONCURRENCY} timeout={to} "
+      f"other={[o for o in outcomes if o != 200 and 'Timeout' not in str(o)]}")
 
 time.sleep(6)
 mt2 = get(GW[0], "/metrics")

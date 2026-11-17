@@ -17,3 +17,5 @@ k8s-deploy.yaml
 .zcode
 .tmp_*
 .pytest_cache
+cpu-e2e-assets
+artifacts

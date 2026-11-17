@@ -183,3 +183,37 @@ def test_shm_pressure_rejects_before_enqueue(gw, monkeypatch):
 
 if __name__ == "__main__":
     raise SystemExit("请用 pytest 运行：python -m pytest tests/test_gateway_resilience.py")
+
+def test_body_limit_drains_request_before_413():
+    """超限请求必须先有界丢弃 body 再回 413：HTTP/1.1 客户端通常先写完
+    body 才读响应，服务端不 drain 就关连接会让它收到 RST（E2E 实测）。"""
+    chunks = [
+        {"type": "http.request", "body": b"x" * 1024, "more_body": True},
+        {"type": "http.request", "body": b"y" * 1024, "more_body": True},
+        {"type": "http.request", "body": b"", "more_body": False},
+    ]
+    received = []
+
+    async def receive():
+        received.append(1)
+        return chunks.pop(0)
+
+    sent = []
+
+    async def send(message):
+        sent.append(message)
+
+    async def app(scope, receive, send):
+        raise AssertionError("超限请求不应进入下游 app")
+
+    mw = gateway._BodySizeLimitMiddleware(app)
+    scope = {
+        "type": "http", "method": "POST", "http_version": "1.1",
+        "headers": [(b"content-type", b"application/json"),
+                    (b"content-length", str(5 * 2**20).encode())],
+    }
+    asyncio.run(mw(scope, receive, send))
+    start = next(m for m in sent if m["type"] == "http.response.start")
+    assert start["status"] == 413
+    assert len(received) == 3 and chunks == []      # body 已读到结束
+

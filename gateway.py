@@ -446,6 +446,26 @@ class _BodySizeLimitMiddleware:
                 if k != b"content-length":
                     continue
                 if v.isdigit() and int(v) > gst._MAX_BODY_BYTES:
+                    # 丢弃已到达的 body 再回 413（有界 8MB / 2s）：HTTP/1.1
+                    # 客户端通常先把整个 body 写完才读响应，服务端不读就关连接
+                    # 会让客户端收到 RST 而不是 413（verify_boundaries 实网复现）。
+                    # 2s 上限防止慢速发送者（slowloris）白占一个请求任务；超出
+                    # 丢弃上限的恶意大体积仍以断连收场，属于可接受降级。
+                    discarded = 0
+                    deadline = time.monotonic() + 2.0
+                    try:
+                        while discarded < 8 * 2**20:
+                            remaining = deadline - time.monotonic()
+                            if remaining <= 0:
+                                break
+                            msg = await asyncio.wait_for(receive(), timeout=remaining)
+                            if msg["type"] == "http.disconnect":
+                                break
+                            discarded += len(msg.get("body") or b"")
+                            if not msg.get("more_body", False):
+                                break
+                    except Exception:  # noqa: BLE001  超时/客户端断开/协议异常
+                        pass
                     await JSONResponse(status_code=413, content={
                         "detail": f"请求体过大（上限 {gst._MAX_BODY_BYTES // 2**20}MB）"
                     })(scope, receive, send)
