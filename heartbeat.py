@@ -34,7 +34,12 @@ def heartbeat_loop(tag: str, pid: int, stats_fn, health_dir: str = None,
     直到 worker 被 supervisor 按 mtime 误杀才暴露——且误杀日志完全对
     不上根因。"""
     health_dir = health_dir or HEALTH_DIR
-    os.makedirs(health_dir, exist_ok=True)
+    try:
+        os.makedirs(health_dir, exist_ok=True)
+    except OSError:
+        # 初始建目录失败不能杀死心跳线程：write_heartbeat 每轮会重试，
+        # 失败经下面的计数告警暴露（原实现裸 makedirs 抛错 → 线程静默死亡）。
+        pass
     fails = 0
     while True:
         if stop is not None and stop.is_set():

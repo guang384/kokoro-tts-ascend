@@ -42,7 +42,10 @@ import protocol
 # 未注入（异常环境）按 0 兜底——绝不让 int("") 这类解析错误在首个请求时炸掉受理路径
 
 
-proc_common.setup_logging(os.getenv("WORKER_TAG") or f"pid{os.getpid()}")
+# 模块级只取 logger，不在 import 时 setup_logging：supervisor 父进程在
+# spawn 前 import 本模块取 target，import 副作用会把父进程的日志 tag
+# 改成 pid/角色名（实测 supervisor 行变 [pid1]、本模块子进程行变 [pid44]）。
+# 子进程入口 gateway_main 在设置 WORKER_TAG 后统一初始化 tag。
 log = logging.getLogger("kokoro.server")
 
 
@@ -314,7 +317,7 @@ async def _synth(text: str, voice: str, speed: float, needs_align: bool,
         except Exception:
             # 全量回收（含尚未 attach 的块）：attach 中途失败时，未打开的
             # 块名仍只在这里可见——只 unlink 已 attach 句柄会留下孤儿，
-            # 要等 420s 清道夫。_unlink_blocks 幂等，finally 再 unlink 无害。
+            # 要等 SHM_ORPHAN_MAX_AGE_S（默认 300s）清道夫。_unlink_blocks 幂等，finally 再 unlink 无害。
             gateway_agg._unlink_blocks(blocks_desc)
             raise
         finally:
@@ -367,7 +370,7 @@ def _validate_request(text_raw, g2p_overrides, dtype_raw, voice_raw,
     try:
         overrides = protocol.normalize_overrides(g2p_overrides)
         dtype = protocol.normalize_dtype(dtype_raw)
-    except ValueError as exc:
+    except (ValueError, TypeError) as exc:
         raise err(400, str(exc))
     return text, overrides, dtype, (voice_raw or gst._default_voice).strip()
 
@@ -436,7 +439,7 @@ class _BodySizeLimitMiddleware:
                                if k == b"content-type"), None)
                 ct = (headers[ct_idx][1].decode("latin-1").lower()
                       if ct_idx is not None else "")
-                if not ct or ct == "application/x-www-form-urlencoded":
+                if not ct or ct.startswith("application/x-www-form-urlencoded"):
                     new_ct = b"application/json"
                     if ct_idx is not None:
                         headers[ct_idx] = (b"content-type", new_ct)
@@ -737,6 +740,9 @@ def gateway_main(i: int, port: int, g2p_queue, result_q) -> None:
     gst._g2p_queue = g2p_queue
     gst._worker_origin = int(i)
     os.environ["WORKER_TAG"] = f"gw-{i + 1}"
+    # 进程级日志 tag 在子进程入口初始化（import 时不能做：父进程会 import
+    # 本模块取 target，import 副作用会污染 supervisor 的 [supervisor] 标签）。
+    proc_common.setup_logging(f"gw-{i + 1}")
     import socket
     import uvicorn
 

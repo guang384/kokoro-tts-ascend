@@ -91,3 +91,25 @@ def test_monotone_enforced_on_malformed_ts():
     out = funasr_ts.bind_char_timestamps("你好", [[100, 50], [40, 200]])
     _assert_contract(out, 2)
     assert out[0][0] <= out[1][0] <= out[1][1]
+
+
+def test_zero_duration_multi_char_unit_keeps_segment_count():
+    """零时长窗口的多字单元必须仍拆成 len(unit) 段：旧实现返回 1 段，
+    "Token" 这种英文词遇到零时长会让 timestamp 段数少于可对齐字符数
+    （消费端按下标绑定错位）。"""
+    out = funasr_ts.bind_char_timestamps("Token。", [[500, 500]])
+    _assert_contract(out, 5)
+    assert out == [[500, 500]] * 5
+
+
+def test_inverted_multi_char_unit_keeps_segment_count():
+    """倒置窗口（e < s）同样按零时长展开为 n 段，段数契约不破。"""
+    out = funasr_ts.bind_char_timestamps("ab", [[300, 100]])
+    _assert_contract(out, 2)
+    assert out == [[300, 300], [300, 300]]
+
+
+def test_positional_fallback_zero_windows_keeps_count():
+    """位置比例兜底路径也经过 _slice_window：零时长段仍须按字符数展开。"""
+    out = funasr_ts.bind_char_timestamps("你好世界", [[0, 0], [100, 100]])
+    _assert_contract(out, 4)

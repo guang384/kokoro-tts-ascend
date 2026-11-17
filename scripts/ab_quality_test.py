@@ -66,7 +66,7 @@ def synth(client: httpx.Client, url: str, text: str, voice: str,
 def wait_ready(url: str, deadline_s: float):
     """等 /health ready；返回 health 字典，超时返回 None。
 
-    串行启动（6 tts + 3 asr 各一次模型加载/冒烟）实测约 10 分钟，
+    串行启动（4 tts + 4 asr 各一次模型加载/冒烟）实测约 10 分钟，
     默认宽限 900s——刚拉起的容器直接跑本脚本不再误报"不可达"。"""
     t0 = time.time()
     while time.time() - t0 < deadline_s:

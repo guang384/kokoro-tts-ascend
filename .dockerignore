@@ -1,7 +1,9 @@
 .git
 .gitignore
 __pycache__
+**/__pycache__
 *.py[cod]
+**/*.py[cod]
 .env
 .venv
 .hf-cache
@@ -17,5 +19,6 @@ k8s-deploy.yaml
 .zcode
 .tmp_*
 .pytest_cache
+**/.pytest_cache
 cpu-e2e-assets
 artifacts

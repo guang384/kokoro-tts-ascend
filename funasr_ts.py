@@ -581,12 +581,18 @@ _ALIGN_RE = re.compile(r"[\u4e00-\u9fff0-9A-Za-z]")   # 与播放器 ALIGN_RE �
 
 
 def _slice_window(s_ms, e_ms, n: int) -> list:
-    """[s,e) 均分 n 份（整毫秒线性取整，单调不减；n<=0 返回空）。"""
+    """[s,e) 均分 n 份（整毫秒线性取整，单调不减；n<=0 返回空）。
+
+    零/负长度窗口也必须返回 n 段（同起同止）：段数契约是「每字符一段」，
+    多字英文单元遇到零时长窗口时少返段会让 timestamp 段数少于可对齐
+    字符数（消费端按下标绑定会错位）。"""
     if n <= 0:
         return []
     s_ms, e_ms = int(s_ms), int(e_ms)
-    if n == 1 or e_ms <= s_ms:
-        return [[s_ms, max(s_ms, e_ms)]]
+    if e_ms <= s_ms:
+        return [[s_ms, s_ms] for _ in range(n)]
+    if n == 1:
+        return [[s_ms, e_ms]]
     step = (e_ms - s_ms) / n
     return [[int(s_ms + k * step), int(s_ms + (k + 1) * step)]
             for k in range(n)]

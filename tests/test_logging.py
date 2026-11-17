@@ -1,6 +1,8 @@
 """日志体系改造回归：文本截断策略、/health 告警节流、X-Request-ID、
 supervisor 正式日志、benchmark 随机文本。"""
 import logging
+import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -69,6 +71,72 @@ def test_supervisor_uses_logging_not_print():
     assert supervisor.log.name == "kokoro.supervisor"
     src = Path(supervisor.__file__).read_text(encoding="utf-8")
     assert "print(" not in src, "supervisor 仍残留 print 输出"
+
+
+def test_worker_module_import_does_not_steal_log_tag():
+    """spawn 前 supervisor 父进程会 import g2p/gateway 取 target；这两个模块
+    若在 import 时 setup_logging，会把父进程 tag 改成 [g2p]/[pidN]（实测
+    supervisor 行变 [pid1]）。用子进程隔离验证 import 后 tag 仍为 supervisor。"""
+    root = Path(__file__).resolve().parents[1]
+    code = (
+        "import sys; sys.path.insert(0, %r);"
+        "import proc_common, config;"
+        "proc_common.setup_logging('supervisor');"
+        "import g2p, gateway;"
+        "print(config._wtag_filter.tag)"
+    ) % str(root)
+    out = subprocess.run([sys.executable, "-c", code], cwd=root,
+                         capture_output=True, text=True, timeout=60)
+    assert out.returncode == 0, out.stderr[-500:]
+    assert out.stdout.strip().splitlines()[-1] == "supervisor"
+
+
+def test_gateway_main_initializes_gw_log_tag(monkeypatch):
+    """gateway_main 在子进程入口按 gw-N 初始化日志 tag（模块 import 不再
+    做）；否则 uvicorn 日志/请求行会带 [pidN]，与 README 的 [gw-1] 不符。"""
+    import socket
+    import uvicorn
+
+    calls = []
+
+    def fake_setup(tag):
+        calls.append(tag)
+        return logging.getLogger("kokoro.server")
+
+    class _Sock:
+        def setsockopt(self, *a):
+            pass
+
+        def bind(self, *a):
+            pass
+
+        def listen(self, *a):
+            pass
+
+    class _Server:
+        def __init__(self, config):
+            self.config = config
+
+        async def serve(self, sockets=None):
+            pass
+
+    monkeypatch.setattr(gateway.proc_common, "setup_logging", fake_setup)
+    monkeypatch.setattr(socket, "socket", lambda *a: _Sock())
+    monkeypatch.setattr(uvicorn, "Server", _Server)
+    monkeypatch.setattr(gateway.asyncio, "run", lambda coro: coro.close())
+    old_env = os.environ.get("WORKER_TAG")
+    old = (gateway.gst._worker_origin, gateway.gst._result_q,
+           gateway.gst._g2p_queue)
+    try:
+        gateway.gateway_main(1, 5174, None, None)
+    finally:
+        if old_env is None:
+            os.environ.pop("WORKER_TAG", None)
+        else:
+            os.environ["WORKER_TAG"] = old_env
+        (gateway.gst._worker_origin, gateway.gst._result_q,
+         gateway.gst._g2p_queue) = old
+    assert calls == ["gw-2"]
 
 
 # ── benchmark 随机文本（压测打穿 g2p 缓存的前提）──

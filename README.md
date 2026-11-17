@@ -168,9 +168,9 @@ retry_forever/shm_usage 三个进程级小件）；`gateway.py` 保留 app/端�
 更新方法见 Dockerfile 内注释）。
 
 ```bash
-TAG=$(date +%Y%m%d)
+TAG=$(date +%Y%m%d)-r8
 docker build --platform linux/arm64 --build-arg IMAGE_VERSION=$TAG \
-  -t kokoro-tts-ascend:$TAG -t kokoro-tts-ascend:latest .
+  -t kokoro-tts-ascend:$TAG .
 ```
 
 ## 运行
@@ -191,6 +191,11 @@ docker run -d --name kokoro-tts \
   -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
   kokoro-tts-ascend:$TAG
 ```
+
+> **非 0 号卡**：只挂载一张 davinci 卡（如 `--device /dev/davinci3`）时，容器内
+> CANN 逻辑号通常是 0，`ASCEND_DEVICE_ID` 留空即可；填宿主机物理号 3 会被
+> 启动探测纠正并告警。启动日志出现 `device=npu:0`、`npu-smi info` 能看到卡即
+> 正确。只有混挂多张 davinci 卡时才需要用 `ASCEND_DEVICE_ID` 指定容器内逻辑号。
 
 > **`--shm-size` 必须带（≥2g）**：音频以 PCM16 写 `/dev/shm`（较 float32 减半）直到聚合
 > 完成；docker 默认 64MB 会被长文本 /tts 写满触发 **SIGBUS**（症状：/v1 正常、/tts 全崩
@@ -243,7 +248,7 @@ docker exec kokoro-tts python /opt/benchmark.py \
 ```
 
 显存核算（两池共居 + 吞吐档参考）：`python scripts/memcalc.py --max-batch <B> --card-gb <容量> --workers <N> --asr-workers <N>`；
-`python scripts/memcalc.py --profiles` 打印 64GB 卡吞吐档表（旧基线 6×B4=24u ~36GB →
+`python scripts/memcalc.py --profiles` 打印 64GB 卡吞吐档表（旧基线 6×B4=24u ~40GB →
 现行默认 4×B8（tts 32u）+4×B8（asr 32u）~55GB → 均衡档 6×B6+4×B4
 （tts 36u/asr 16u）~58GB；4×B12+2×B10=48u 按 1.05×预算+ctx 新核算约 67GB，
 64GB 卡已超，不再作为默认候选。
@@ -274,7 +279,7 @@ python scripts/parity_smoke.py                          # 故障注入冒烟（�
 
 ```bash
 # 0) 前置：WSL Docker 可用；本机已有 kokoro-tts-ascend 镜像（或桌面 .tar.gz）
-bash scripts/extract_cpu_assets.sh                       # 默认 --image kokoro-tts-ascend:latest
+bash scripts/extract_cpu_assets.sh --image kokoro-tts-ascend:<日期tag>
 #    缺镜像但有导出包：bash scripts/extract_cpu_assets.sh --tar /mnt/c/.../kokoro-tts-ascend-YYYYMMDD.tar.gz
 
 # 1) 构建 CPU 镜像（torch CPU 轮子约 2-3GB；源不可达可 --build-arg PYTHON_IMAGE=pytorch/pytorch:2.15.0-cpu）
@@ -297,7 +302,7 @@ CPU 验证不能替代 arm64/NPU 路径。以下脚本构建**生产 arm64 镜�
 烘入/NPU 预算锚点/采样率守卫），并记录 QEMU 下 torch 是否可导入：
 
 ```bash
-# 发布镜像 tag 必须带日期（与 .tmp_build_arm.sh 的 date +%Y%m%d 约定一致）
+# 发布镜像 tag 必须带日期（YYYYMMDD-rN）
 TAG=$(date +%Y%m%d)-r8
 docker build --platform linux/arm64 --build-arg IMAGE_VERSION=$TAG \
   -t kokoro-tts-ascend:$TAG .
@@ -306,7 +311,15 @@ python3 scripts/npu_prep.py --skip-build --image kokoro-tts-ascend:$TAG
 python3 scripts/npu_prep.py
 ```
 
-`npu_prep.py` 会强制校验镜像 tag 与 `IMAGE_VERSION` label 必须含 8 位日期。
+`npu_prep.py` 会强制校验镜像 tag 与 `IMAGE_VERSION` label 必须含 8 位日期，
+并逐项校验镜像 `Config.Env` 与 `Dockerfile` + `TUNABLE_PARAMS` 的全部默认值
+（Dockerfile 未显式设置、由代码兜底的键也查），同时拒绝底座镜像残留的旧业务
+env（如 `KOKORO_LANG_CODE`）——防止从旧镜像 FROM 的增量镜像继承
+TTS_WORKERS=6/ASR_WORKERS=3/TTS_MAX_BATCH_SIZE=4 等历史默认。
+
+若模型下载导致完整 `Dockerfile` 构建受阻，可用 `Dockerfile.npuprep` 以既有
+arm64 生产镜像为底座做增量验证（显式重放全部业务 ENV、钉 funasr 1.4.21）；
+该文件只用于验证，正式发布仍必须用根目录 `Dockerfile` 全量重建。
 
 注意：QEMU 下 torch 常因 oneDNN/xbyak 段错误不可用（脚本只记录、不门控）；
 NPU 算子、真机显存预算与吞吐必须在 Ascend 主机上用同一镜像再跑一次
@@ -334,7 +347,7 @@ fallback 基底；模型资产缺失时 `extract_cpu_assets.sh` 会明确报错�
 
 | 变量 | 默认 | 说明 |
 |---|---|---|
-| `TTS_WORKERS` | 4 | 前向进程数，单卡吞吐主参数（每进程独立显存预算；64GB 卡默认 4×B8，32GB 卡建议 2） |
+| `TTS_WORKERS` | 4 | 前向进程数，单卡吞吐主参数（每进程独立显存预算；64GB 卡默认 4×B8；32GB 卡建议 `TTS_WORKERS=2` **且** `ASR_WORKERS=2`（或 `ASR_MAX_BATCH_SIZE=4`），否则 4×B8 asr 池 + 2×B8 tts 池仍会超卡） |
 | `TTS_MAX_BATCH_SIZE` | 8 | 单批最大句数，**决定显存峰值与预算**（B=8/120字/0.5速 ≈ 9.3GB/worker 预算；64GB 卡默认整卡 ~55GB 物理含 asr 池） |
 | `ASR_WORKERS` | 4 | asr 对齐进程数（唯一 FunASR 池，/tts 依赖）。默认 4×B8=32u，与 tts 4×B8=32u 对等；q_asr 排队 EMA 调节——走高 +1（B8 每 worker 预算 ~2.7GB / npu-smi ~3.1GB），持续走低可回落 3 |
 | `ASR_MAX_BATCH_SIZE` | 8 | asr 单批认领上限，**决定 asr 显存预算**（pipeline 公式随它缩放：B=8 ≈ 2.7GB/worker；启动期最坏形状热身实测校验，OOM 阶梯自降批宽不 fail worker） |
@@ -373,7 +386,7 @@ fallback 基底；模型资产缺失时 `extract_cpu_assets.sh` 会明确报错�
   `ASR_WORKERS` 3→4、`ASR_MAX_BATCH_SIZE` 4→8。64GB 整卡默认约 55GB 物理占用；
   旧部署若沿用 5 tts + 4 asr B4，真机实测约 62.4GB（95%），升级前用
   `scripts/memcalc.py --workers N --asr-workers N` 核对 env，或显式钉住每个值
-  （`k8s-deploy.yaml` 已钉）。
+  （`k8s-deploy.yaml` 已显式钉住四个容量键）。
 - **/tts 最坏时延变短**：音频+对齐共享一个 `WAIT_TIMEOUT_S` 截止线（不再是两段各 120s
   串联）；依赖旧 2×WAIT 上限的长文本客户端会提前收到 504。
 - **funasr 钉 1.4.21**：批推数值安全补丁依赖其内部结构；升级 funasr 前必须重跑
@@ -508,14 +521,16 @@ curl -s http://127.0.0.1:5174/v1/audio/speech -H 'Content-Type: application/json
 
 ## K8s 探针（单容器多进程架构）
 
-完整部署示例（HAMi vNPU 显存切分 32G + 探针 + shm）：[`k8s-deploy.yaml`](k8s-deploy.yaml)
+完整部署示例（HAMi vNPU 显存切分 64G + 探针 + shm）：[`k8s-deploy.yaml`](k8s-deploy.yaml)
+（清单 `huawei.com/Ascend910B3-memory: "64000"`；切 32G 时须同步下调
+`TTS_WORKERS`/`ASR_WORKERS` 或批宽，按 `memcalc.py` 核算）
 
 **所有探针共用 `/health`**（业界最常见做法，只有一个地址，无从挂错），
 配 **startupProbe 宽限**（其成功前 readiness/liveness 都不生效）：
 
 | 探针 | 配置 | 说明 |
 |---|---|---|
-| startupProbe | `httpGet: /health`，`failureThreshold: 90` × 10s | 串行启动宽限 15 分钟（默认 6 tts+3 asr 串行 init，实测约 10 分钟）；此期间 liveness 不生效 |
+| startupProbe | `httpGet: /health`，`failureThreshold: 90` × 10s | 串行启动宽限 15 分钟（默认 4 tts+4 asr 串行 init，实测约 10 分钟）；此期间 liveness 不生效 |
 | readinessProbe | `httpGet: /health`，periodSeconds 5 | 能力未齐（每角色 ≥1 ready 前）→ **503 摘流量** |
 | livenessProbe | `httpGet: /health`，**failureThreshold 36** × 10s（6 分钟；Docker HEALTHCHECK 的 start-period 600s/失稳 150s 是另一套独立预算，二者口径不同勿混抄） | 只在**长时间**不可服务时重启（覆盖 worker 重生+模型重载 ~1-2 分钟的瞬态）。阈值勿照抄社区 3 次——预热期由 startupProbe 保护，但瞬态恢复窗口不应触发容器重启 |
 
@@ -541,10 +556,10 @@ livenessProbe:                  # 阈值覆盖瞬态恢复窗口（勿照抄社�
 
 | 指标族 | 类型 | 说明 |
 |---|---|---|
-| `kokoro_e2e_requests/successes/timeouts/rejected/fast_reject/cancelled/failed_total` | Counter | 服务级端到端计数（跨网关聚合；failed=超时+合成失败+500；fast_reject=准入快速拒绝，见错误码段） |
+| `kokoro_e2e_requests/successes/timeouts/rejected/fast_reject/cancelled/failed_total` | Counter | 服务级端到端计数（跨网关聚合；failed=全部终态失败，含 4xx 输入错误/超时/合成失败/5xx；server_5xx 单列；fast_reject=准入快速拒绝，见错误码段） |
 | `kokoro_request_duration_seconds` | Histogram | 请求耗时（档位随 `WAIT_TIMEOUT_S` 推导：固定阶梯 1/2/5/10/15/20/30/45/60/120… 中小于总预算的档 + 总预算本身；默认 120s 即 `1/2/5/10/15/20/30/45/60/120`。`histogram_quantile()` 查询侧算分位） |
 | `kokoro_request_duration_{p50,p90,p99}_seconds` | Gauge | 滑动窗口分位数直读（近 50 次/网关，跨网关取保守最大） |
-| `kokoro_queue_{depth,in_total,out_total,avg_wait_ms,bad_total}{stage=...}` | Gauge/Counter | 队列 4 阶段（g2p/tts/asr/gateway，按请求流经顺序）；`bad_total`=坏/毒 member 丢弃累计（载荷损坏、重派超限放弃——非零即需排查；增量同时由 supervisor 打 WARNING，不依赖 metrics 开关） |
+| `kokoro_queue_{depth,in_total,out_total,avg_wait_ms,bad_total}{stage=...}` | Gauge/Counter | 队列 4 阶段（g2p/tts/asr/gateway，按请求流经顺序）；`bad_total`=坏/毒 member 丢弃累计（tts/asr 认领队列；g2p 普通队列的坏消息只落 warning 日志），非零即需排查；增量同时由 supervisor 打 WARNING |
 | `kokoro_worker_{done_total,errors_total,ready}{worker,role=...}` | Counter/Gauge | 每 worker 完成/错误/就绪 |
 | `kokoro_worker_crashes_total{worker}` | Counter | 累计崩溃次数 |
 | `kokoro_worker_realtime_x{worker}` · `kokoro_worker_{avg_ms,stuck_seconds}{worker,role}` | Gauge | tts 实时倍速 / 各 worker 平均耗时 / 卡死秒数 |
@@ -552,7 +567,7 @@ livenessProbe:                  # 阈值覆盖瞬态恢复窗口（勿照抄社�
 | `kokoro_worker_npu_{mem_reserved_mb,budget_pct}{worker}` | Gauge | 每 worker（tts+asr）NPU 预留/预算占比 |
 | `kokoro_worker_npu_mem_{allocated,estimated,planned,limit,budget,context}_mb{worker,role}` · `kokoro_worker_npu_mem_card_pct{worker,role}` | Gauge | 每 worker 内存明细：allocated/reserved 来自 torch；context=CANN 上下文（tts/asr 均 450MB）；estimated=reserved+context；planned=0.98×budget+context（预占池）；limit=1.05×budget+context（fraction 进程上限）；card_pct=estimated/整卡 |
 | `kokoro_worker_npu_mem_{process,delta,context_actual}_mb{worker,role}` | Gauge | **npu-smi 实测**：process=进程表 `Process memory(MB)`（同 PID 多行求和）；delta=process−planned（正=公式低估）；context_actual=max(0, process−reserved)。每芯片进程表最多 8 条，默认 4 tts + 4 asr 正好 8 行；超出时 `process_mb` **缺失而非 0**，`npu-smi info -t proc-mem` 仅作兜底 |
-| `kokoro_worker_batch_effective{worker,role}` · `kokoro_worker_batch_patch_ok{worker,role}` | Gauge | asr 批推生效批宽 / 安全补丁状态（0=未装，运行时已自动降单条） |
+| `kokoro_worker_batch_effective{worker,role}` · `kokoro_worker_batch_patch_ok{worker,role}` | Gauge | asr 批推生效批宽 / 安全补丁状态（0=未安装或不适用；仅 cnn_blstm 类型未装成功时才自动降单条） |
 | `kokoro_g2p_cache_{hits,misses}_total{worker}` | Counter | G2P 缓存命中率 |
 | `kokoro_shm_{used_mb,total_mb,pct}` | Gauge | /dev/shm 水位（写满=SIGBUS 根因） |
 | `kokoro_degraded` / `kokoro_build_info{version}` | Gauge | 降级状态 / 构建信息 |

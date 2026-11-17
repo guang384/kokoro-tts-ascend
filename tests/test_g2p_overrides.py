@@ -87,6 +87,38 @@ def test_injection_failure_rolls_back(monkeypatch):
         assert jieba.dt.FREQ.get(w, 0) == freq_before[w], w
 
 
+@pytest.mark.parametrize("bad", [
+    {"长文本": 1},          # 值不是 str/list（旧实现 list(int) → TypeError）
+    {1: "a1"},              # 键不是字符串（旧实现 int.strip() → AttributeError）
+])
+def test_normalize_malformed_types_raise_value_error(bad):
+    """异常类型必须是 ValueError：网关只把 ValueError 映射为 400，
+    TypeError/AttributeError 会漏成 500。"""
+    with pytest.raises(ValueError):
+        protocol.normalize_overrides(bad)
+
+
+def test_override_restore_preserves_jieba_total():
+    """jieba.add_word 不只会改 FREQ，还会累加 dt.total；还原时必须写回
+    注入前的精确 total——否则每来一个带覆盖的请求，全局词频总量就在
+    原有词上多出 10000+old_freq，切分统计随请求数单调漂移。"""
+    import jieba
+
+    import pipeline
+
+    jieba.initialize()
+    word = "中国"                      # 词典内已有词：覆盖前后都会走 add_word 分支
+    before_total = jieba.dt.total
+    before_freq = jieba.dt.FREQ[word]
+    applied = pipeline._apply_request_overrides({word: ["zhong1", "guo2"]})
+    try:
+        assert jieba.dt.total != before_total   # 注入确实改过 total（前提成立）
+    finally:
+        pipeline._restore_request_overrides(*applied)
+    assert jieba.dt.total == before_total
+    assert jieba.dt.FREQ[word] == before_freq
+
+
 # ── API 边界校验（handler 在最前面拒绝，不会触达流水线）──
 def test_tts_api_rejects_bad_overrides():
     from gateway import BizError, TTSRequest, tts_business

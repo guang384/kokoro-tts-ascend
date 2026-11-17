@@ -216,6 +216,7 @@ def _apply_request_overrides(overrides: dict):
 
     saved = {}
     orig_seg = pinyin_core.seg
+    saved_total = jieba.dt.total
     try:
         # 最长优先的覆盖词模式：处理"覆盖词嵌在更长 token 内"的形态
         # （tone sandhi 会把相邻词合并成更长的 word 再查读音）
@@ -245,18 +246,19 @@ def _apply_request_overrides(overrides: dict):
             pinyin_core.PHRASES_DICT[word] = [[p] for p in pys]
             jieba.add_word(word, freq=10000)
         pinyin_core.seg = _seg_with_overrides
-        return saved, orig_seg
+        return saved, orig_seg, saved_total
     except Exception:
         # 注入中途失败（异常/词典坏态）：已改的部分必须回滚——否则临时读音
         # 会永久留在全局词典（后续请求读错）且 jieba 词频被抬高
-        _restore_request_overrides(saved, orig_seg)
+        _restore_request_overrides(saved, orig_seg, saved_total)
         raise
 
 
-def _restore_request_overrides(saved: dict, orig_seg) -> None:
+def _restore_request_overrides(saved: dict, orig_seg, saved_total: int) -> None:
     """锁内还原（finally 必达）：分词器/词典值逐词恢复，jieba 按注入前
     词频还原（原本不存在 del_word，原有词恢复原频——不回退会让后续请求
-    的切分边界悄悄变化）。"""
+    的切分边界悄悄变化）。同时恢复 jieba.dt.total：add_word 会累加
+    total（不是只改 FREQ），不还原会让词频统计随请求数单调漂移。"""
     import jieba
     import pypinyin.core as pinyin_core
 
@@ -275,6 +277,8 @@ def _restore_request_overrides(saved: dict, orig_seg) -> None:
             # 词频错位只影响切分边界（读音仍由 PHRASES_DICT 决定），
             # 但必须留痕——这是"字典脏了"的唯一线索
             log.warning("g2p override rollback failed for %r (jieba freq)", word)
+    # add_word/del_word 都会调整 total；最后无条件写回注入前的精确值。
+    jieba.dt.total = saved_total
 
 
 class G2PEngine:

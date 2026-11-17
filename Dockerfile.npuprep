@@ -1,0 +1,75 @@
+# =====================================================================
+# arm64 增量验证镜像（不是正式发布 Dockerfile）
+#
+# 用途：本机/内网无法从 hf-mirror 完整下载模型时，以既有 arm64 生产镜像
+# （torch_npu/CANN/模型已烘入）为底座，overlay 当前代码 + 钉住的 funasr
+# 1.4.21，用于真机功能验证。正式发布必须用根目录 `Dockerfile` 全量重建。
+#
+# 关键：底座镜像可能携带历史 ENV 默认值（例如旧镜像 TTS_WORKERS=6 /
+# ASR_WORKERS=3 / TTS_MAX_BATCH_SIZE=4）。这里显式重放当前 Dockerfile 的
+# 全部业务 ENV，确保容器实际运行值与代码默认/文档一致；npu_prep.py 会
+# 校验 image Config.Env 与 Dockerfile 一致，防止再次漏掉。
+#
+# 构建：
+#   docker build --platform linux/arm64 -f Dockerfile.npuprep \
+#     --build-arg BASE_IMAGE=kokoro-tts-ascend:20261117-r8 \
+#     --build-arg IMAGE_VERSION=$(date +%Y%m%d)-rN-verify \
+#     -t kokoro-tts-ascend:$(date +%Y%m%d)-rN-verify .
+# =====================================================================
+ARG BASE_IMAGE=kokoro-tts-ascend:20261117-r8
+FROM ${BASE_IMAGE}
+
+ARG IMAGE_VERSION=dev
+
+# 与根目录 Dockerfile 的 ENV 块保持一致（部署默认值唯一来源）。
+ENV PYTHONUNBUFFERED=1 \
+    HF_HOME=/opt/hf-cache \
+    HF_ENDPOINT=https://hf-mirror.com \
+    HF_HUB_OFFLINE=1 \
+    KOKORO_MODEL_ID=hexgrad/Kokoro-82M-v1.1-zh \
+    KOKORO_SAMPLE_RATE=24000 \
+    DEVICE= \
+    KOKORO_VOICE=zf_001 \
+    TTS_MAX_INPUT_CHARS=2000 \
+    MAX_INFLIGHT_SENTENCES=512 \
+    MAX_PENDING_REQUESTS=200 \
+    WORKER_MAILBOX_SIZE=1024 \
+    GATEWAY_WORKERS=2 \
+    G2P_WORKERS=2 \
+    TTS_WORKERS=4 \
+    ASR_WORKERS=4 \
+    WAIT_TIMEOUT_S=120 \
+    TTS_BATCH_BUCKET_CHARS=64 \
+    TTS_SPEED_FLOOR=0.5 \
+    KOKORO_EN_G2P=auto \
+    FUNASR_DEVICE=auto \
+    LOG_LEVEL=INFO \
+    TTS_CHUNK_CHARS=120 \
+    TTS_MAX_BATCH_SIZE=8 \
+    ASR_MAX_BATCH_SIZE=8 \
+    PORT=5174 \
+    FUNASR_MODEL_DIR=/opt/funasr-models/timestamp-v1 \
+    ASCEND_DEVICE_ID= \
+    PYTHONPATH=/app
+
+# 底座可能早于 1.4.21 钉版；批推安全补丁依赖该版本内部结构。
+RUN pip install --no-cache-dir "funasr==1.4.21"
+
+WORKDIR /app
+COPY gateway.py gateway_state.py gateway_agg.py gateway_obs.py audio_enc.py pipeline.py npu_ops.py batched_model.py funasr_ts.py supervisor.py g2p.py compute.py worker_common.py tts_worker.py asr_worker.py proc_common.py config.py redis_transport.py heartbeat.py protocol.py ./
+COPY tests/ tests/
+COPY conftest.py pytest.ini ./
+COPY Dockerfile requirements.txt ./
+COPY scripts/ scripts/
+RUN ln -sf /app/scripts/benchmark.py /opt/benchmark.py \
+    && chmod +x /app/scripts/with_ascend_env.sh
+
+ENV IMAGE_VERSION=${IMAGE_VERSION}
+LABEL org.opencontainers.image.version=${IMAGE_VERSION} \
+      org.opencontainers.image.title="kokoro-tts-ascend-arm64-verify"
+
+EXPOSE 5174
+HEALTHCHECK --interval=30s --timeout=5s --start-period=600s --retries=5 \
+    CMD curl -fsS "http://127.0.0.1:${PORT}/health" || exit 1
+
+CMD ["python3", "supervisor.py"]

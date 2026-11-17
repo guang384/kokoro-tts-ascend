@@ -2,7 +2,7 @@
 # 配置矩阵基准 runbook——在真机 root shell 执行（建议于 /root/cui 下，结果落同目录）。
 # 用法: bash bench_matrix.sh [CARD] [IMAGE]
 #   CARD  默认 0（服务容器实际挂载的卡号，与现网一致）
-#   IMAGE 默认 kokoro-tts-ascend:20261114-r3（pad 仪表在本版 forward done 行）
+#   IMAGE 必填：要测的日期 tag（不设默认——旧镜像会测到旧代码/旧 ENV）
 #
 # 三组配置：
 #   baseline_4xB8 : 4 tts × B8 + 4 asr     （现状基线）
@@ -11,12 +11,18 @@
 #
 # 注意：
 #   - 脚本会按配置反复重启 kokoro-tts 容器——执行期间保持业务无流量
+#   - 只挂一张 --device /dev/davinci$CARD 时，容器内逻辑号从 0 起；
+#     ASCEND_DEVICE_ID 固定传 0（不是宿主机物理卡号 CARD）
 #   - 每组配置自动等 /health ready（capacity_check 不过会报 fail 并继续下一组）
 #   - 每组采集：/v1 与 /tts × c=1/4/8/16 基准、forward/tts/v1 done 日志、
 #     /metrics、npu-smi——全部落在 $OUT/
 set -u
 CARD=${1:-0}
-IMAGE=${2:-kokoro-tts-ascend:20261114-r3}
+IMAGE=${2:-}
+if [ -z "$IMAGE" ]; then
+  echo "用法: bash bench_matrix.sh [CARD] IMAGE（IMAGE 必填，如 kokoro-tts-ascend:20261117-r8）" >&2
+  exit 2
+fi
 NAME=kokoro-tts
 OUT=bench_$(date +%m%d-%H%M)
 mkdir -p "$OUT"
@@ -29,7 +35,7 @@ run_config () {
     --shm-size 2g --log-opt max-size=50m --log-opt max-file=3 \
     -p 5174:5174 \
     -e TTS_WORKERS=$workers -e TTS_MAX_BATCH_SIZE=$maxb \
-    -e ASR_WORKERS=$asr -e GATEWAY_WORKERS=2 -e ASCEND_DEVICE_ID=$CARD \
+    -e ASR_WORKERS=$asr -e GATEWAY_WORKERS=2 -e ASCEND_DEVICE_ID=0 \
     --device /dev/davinci$CARD --device /dev/davinci_manager \
     --device /dev/devmm_svm --device /dev/hisi_hdc \
     -v /usr/local/Ascend/driver:/usr/local/Ascend/driver:ro \

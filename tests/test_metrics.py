@@ -117,6 +117,22 @@ def test_metrics_format_and_families(gw, monkeypatch):
 
 
 
+def test_stuck_metric_carries_worker_and_role_labels(gw):
+    """stuck_seconds 声明了 {worker,role} 两个 label（README 契约）；
+    旧实现只传 worker，scrape 时该样本缺 role（查询侧按 role 过滤会漏）。"""
+    _full_fixture(gw)
+    _write_heartbeat(gateway_state._health_dir, "tts-0", {
+        "role": "tts", "device": "npu:0", "ready": True, "stuck_s": 12.5,
+        "warm": {"kokoro": "ok"},
+        "stats": {"jobs": 20, "forward_ms": 4000.0, "audio_s": 100.0},
+        "npu_mem": {"reserved_mb": 5340.0}})
+    text = _scrape()
+    line = next(ln for ln in text.splitlines()
+                if ln.startswith("kokoro_worker_stuck_seconds{"))
+    assert 'worker="tts-0"' in line and 'role="tts"' in line
+    assert line.endswith(" 12.5")
+
+
 def test_worker_npu_mem_metrics_for_both_pools(gw):
     """tts/asr 心跳里的 npu_mem 都要变成 per-worker 指标：
     reserved/budget_pct 兼容旧族，allocated/estimated/planned/budget/

@@ -16,7 +16,9 @@ from functools import lru_cache
 import proc_common
 import protocol
 
-log = proc_common.setup_logging(os.getenv("WORKER_TAG", "g2p"))
+# 不在 import 时 setup_logging：supervisor 父进程 import 本模块取 target，
+# import 副作用会把父进程日志 tag 改成 [g2p]（实测）。子进程入口 main 里
+# 用实际角色 tag 初始化；模块级日志统一走 main 传入的 logger。
 
 G2P_WORKERS = proc_common.env_int("G2P_WORKERS", minimum=1)   # 进程数（supervisor 用；此处仅作线程数默认值）
 _G2P_THREADS = proc_common.env_int("G2P_THREADS", G2P_WORKERS, minimum=1)  # 本进程音素化线程池大小（默认随进程数）
@@ -169,11 +171,18 @@ def main(idx: int, g2p_queue, tts_queue, gateway_queues) -> None:
     # （依赖/资源未就绪）可自愈，不再永久躺平——get_g2p 只在成功后缓存
     # 单例，重试安全
     def _init():
-        g2p = pipeline.get_g2p()
-        g2p.phonemize("你好。")  # 预热（jieba 词典/misaki 首载）
-        _warm["g2p"] = "ok"
-        log.info("G2P text engine ready")
-        return g2p
+        # 初始化也纳入看门狗：jieba/misaki/espeak 首载是可能永久阻塞的外呼
+        # （与 tts/asr 模型加载同风险）。不置 busy 时心跳照常新鲜、stuck=0，
+        # supervisor 永远看不到卡死的 g2p，整条文本段无人消费。
+        _busy.enter()
+        try:
+            g2p = pipeline.get_g2p()
+            g2p.phonemize("你好。")  # 预热（jieba 词典/misaki 首载）
+            _warm["g2p"] = "ok"
+            log.info("G2P text engine ready")
+            return g2p
+        finally:
+            _busy.exit()
 
     g2p = proc_common.retry_forever(_init, "g2p", _warm, "G2P", log)
 

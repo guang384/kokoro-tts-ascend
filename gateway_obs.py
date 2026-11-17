@@ -130,9 +130,10 @@ def _sweep_orphan_shm() -> int:
 
     worker 被 SIGBUS 杀死时来不及走 unlink 兜底，半成品块永久占用 /dev/shm
     （20261109：64MB 写满 → 重生 worker 即死即泄漏，池无法恢复）。正常块的
-    生命周期有界：单请求截止线 ≤WAIT_TIMEOUT_S(120s)（/tts 音频+时间戳
-    共享同一预算）、聚合清扫 ≤240s——超龄线
-    （gst.SHM_ORPHAN_MAX_AGE_S 公式有效值，默认 420s）之外还在的必是无主孤儿。非 POSIX/Windows 开发机目录不存在 → 0。"""
+    生命周期有界：单请求截止线 ≤WAIT_TIMEOUT_S(默认 120s)（/tts 音频+时间戳
+    共享同一预算）、聚合清扫 ≤2×WAIT——超龄线
+    （gst.SHM_ORPHAN_MAX_AGE_S = max(配置值, 2×WAIT+60)，默认 300s）之外还在
+    的必是无主孤儿。非 POSIX/Windows 开发机目录不存在 → 0。"""
     try:
         names = os.listdir(gst._SHM_SWEEP_DIR)
     except OSError:
@@ -629,7 +630,7 @@ if gst.METRICS_ENABLED:
                     if nm.get(key) is not None:
                         W[short].add_metric([tag, role], nm[key])
                 if w_raw.get("stuck_s"):
-                    W["stuck"].add_metric([tag], w_raw["stuck_s"])
+                    W["stuck"].add_metric([tag, role], w_raw["stuck_s"])
             # 崩溃计数来自 supervisor 快照映射（不随 worker 心跳上报）
             for wtag, n_crash in (data.get("crashes") or {}).items():
                 if n_crash:

@@ -4,6 +4,7 @@
 所有 CPU E2E 的最终目的都是 arm64 NPU 设备；本脚本把 QEMU 下可验证的
 arm64 风险单独拉出来：
   - 生产 Dockerfile 的 arm64 镜像构建（无 torch import，QEMU 安全）
+  - 镜像 Config.Env 全量 TUNABLE 默认值 + 底座遗留业务 env 检查
   - /app 模块清单与仓库根模块一致（拆分后新文件不能漏 COPY）
   - compileall / 19 个模块 import（不含 batched_model：torch 在 QEMU 下可能段错误）
   - arm64 镜像内 pytest（排除需 in-process torch / 真实 redis 多进程的用例）
@@ -23,13 +24,88 @@ import argparse
 import glob
 import os
 import re
+import sys
 from datetime import datetime
 
 from cpu_e2e import E2E
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, ROOT)
+from config import TUNABLE_PARAMS  # noqa: E402  默认值单一来源
+
 DEFAULT_IMAGE = "kokoro-tts-ascend:npuprep-" + datetime.now().strftime("%Y%m%d")
 PLATFORM = "linux/arm64"
+
+# 业务 env 命名空间：镜像里出现这些前缀、却既不在 Dockerfile 也不在
+# TUNABLE_PARAMS 的键，说明底座镜像带了历史遗留配置（如旧 KOKORO_LANG_CODE）。
+BUSINESS_ENV_PREFIXES = ("KOKORO_", "TTS_", "ASR_", "G2P_", "GATEWAY_",
+                         "FUNASR_", "WAIT_", "MAX_", "WORKER_")
+# 部署/内部注入变量：不属于 TUNABLE_PARAMS，但允许出现在镜像 env 中。
+KNOWN_EXTRA_ENV = {"FUNASR_MODEL_DIR", "KOKORO_HEALTH_DIR",
+                   "WORKER_TAG", "WORKER_IDX", "IMAGE_VERSION"}
+
+
+def _docker_env_map(text: str) -> dict:
+    """解析 Dockerfile 的 ENV 指令（含续行），忽略注释里的 `KEY=value`。
+
+    不能用全局正则扫全文：Dockerfile 注释里有 `GATEWAY_WORKERS=N` 这类
+    示例，会被误当成真实默认值。"""
+    env = {}
+    lines = text.splitlines()
+    i = 0
+    while i < len(lines):
+        line = lines[i].strip()
+        if line.startswith("ENV "):
+            buf = line[4:]
+            while buf.endswith("\\") and i + 1 < len(lines):
+                i += 1
+                buf = buf[:-1] + " " + lines[i].strip()
+            for m in re.finditer(r"([A-Z][A-Z0-9_]*)=(\"[^\"]*\"|\S*)", buf):
+                env[m.group(1)] = m.group(2).strip('"')
+        i += 1
+    return env
+
+
+def _env_drift(image_env: dict, docker_env: dict, tunables: dict):
+    """返回 (值不一致, Dockerfile 有而镜像缺失, 遗留业务 env)。
+
+    覆盖三类历史漂移：
+    - 增量 FROM 旧镜像，底座 ENV 覆盖 Dockerfile/代码默认（6 tts/3 asr/B4）；
+    - Dockerfile 未写、由代码默认兜底的 TUNABLE 键，被底座设成旧值；
+    - 底座残留已废弃的业务 env（旧 KOKORO_LANG_CODE）。"""
+    mismatched, missing, legacy = {}, {}, {}
+    docker_business = {k: v for k, v in docker_env.items() if k in tunables}
+    for key, want in docker_business.items():
+        got = image_env.get(key)
+        if got is None:
+            missing[key] = want
+        elif got != want:
+            mismatched[key] = f"image={got!r} Dockerfile={want!r}"
+    # Dockerfile 里还有非 TUNABLE 的部署常量（FUNASR_MODEL_DIR / PYTHONPATH /
+    # HF_HOME ...）：底座镜像若带旧值同样会覆盖 Dockerfile，必须一起校验。
+    # 含 ${...} 的是 build-arg 模板（PIP_INDEX_URL/HF_ENDPOINT/IMAGE_VERSION），
+    # 镜像里是展开后的值，不能按字面比较。
+    for key, want in docker_env.items():
+        if key in tunables or "${" in want:
+            continue
+        got = image_env.get(key)
+        if got is None:
+            missing[key] = want
+        elif got != want:
+            mismatched[key] = f"image={got!r} Dockerfile={want!r}"
+    for key, default in tunables.items():
+        if key in docker_business:
+            continue
+        got = image_env.get(key)
+        if got is not None and got != default:
+            mismatched[key] = (f"image={got!r} code-default={default!r}"
+                               " (Dockerfile 未设置)")
+    for key, val in image_env.items():
+        if key in tunables or key in docker_env or key in KNOWN_EXTRA_ENV:
+            continue
+        if key.startswith(BUSINESS_ENV_PREFIXES):
+            legacy[key] = val
+    return mismatched, missing, legacy
 
 
 class NpuPrep(E2E):
@@ -88,6 +164,29 @@ class NpuPrep(E2E):
                    parts[2] if len(parts) > 2 else "")
         self.check("EXPOSE 5174", "5174" in (parts[3] if len(parts) > 3 else ""),
                    parts[3] if len(parts) > 3 else "")
+
+        # 1b) 镜像 Config.Env 必须重放当前 Dockerfile 的业务默认值；Dockerfile
+        # 未显式设置、由代码默认兜底的 TUNABLE 键，若被底座镜像设过旧值也必须
+        # 拦住。增量 overlay 从旧镜像 FROM 时最容易漏：旧 TTS_WORKERS=6 /
+        # ASR_WORKERS=3 / TTS_MAX_BATCH_SIZE=4 会覆盖代码默认（实测 6/3/B4）。
+        rc, env_out = self.docker(
+            "image", "inspect", self.image, "--format",
+            "{{range .Config.Env}}{{println .}}{{end}}")
+        env = dict(ln.split("=", 1) for ln in env_out.splitlines() if "=" in ln)
+        df_text = open(os.path.join(ROOT, "Dockerfile"), encoding="utf-8").read()
+        df_env = _docker_env_map(df_text)
+
+        df_conflicts = {k: (v, TUNABLE_PARAMS[k]) for k, v in df_env.items()
+                        if k in TUNABLE_PARAMS and v != TUNABLE_PARAMS[k]}
+        self.check("Dockerfile ENV 与 TUNABLE_PARAMS 默认一致",
+                   not df_conflicts, str(df_conflicts))
+        mismatched, missing, legacy = _env_drift(env, df_env, TUNABLE_PARAMS)
+        self.save("image-env.txt", "\n".join(f"{k}={env.get(k)}"
+                                              for k in sorted(env)))
+        self.check("镜像 ENV 业务默认与 Dockerfile/代码默认一致",
+                   not mismatched and not missing,
+                   f"mismatch={mismatched} missing={missing}")
+        self.check("镜像无遗留旧业务 ENV", not legacy, str(legacy))
 
         # 2) /app 模块清单与仓库根模块一致（拆分后新文件漏 COPY 会在这里暴露）
         host_mods = sorted(os.path.basename(p) for p in glob.glob(os.path.join(ROOT, "*.py"))

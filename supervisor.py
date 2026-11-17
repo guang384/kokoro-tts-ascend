@@ -495,11 +495,14 @@ def check_wedge(now: float) -> None:
 
 
 def supervisor_snapshot() -> dict:
+    # dict(...) 先整体拷贝：心跳线程遍历期间 spawn_one 可能 setdefault 新键，
+    # 直接 list(_crash_total.items()) 的 Python 层迭代会抛
+    # "dictionary changed size during iteration" → 心跳线程死亡。
+    crashes = dict(_crash_total)
     return {"role": "supervisor", "ready": True,
             "uptime_s": round(time.time() - _started_at, 1),
             "warm": {},
-            "stats": {"crashes": {_wtag(r, i): n for (r, i), n in
-                                  list(_crash_total.items())}},
+            "stats": {"crashes": {_wtag(r, i): n for (r, i), n in crashes.items()}},
             "expected": dict(EXPECTED_ROLES),
             "mailboxes": proc_common.mailbox_depths(mailboxes)}
 

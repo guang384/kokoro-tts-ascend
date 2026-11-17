@@ -1,18 +1,18 @@
 # 多容器单卡共享模式（可选）：nginx 最少连接负载均衡 -> N 个 api 容器共享 /dev/davinci0
-# 用法: docker compose up -d --build --scale api=4
+# 用法: IMAGE_TAG=$(date +%Y%m%d)-r8 docker compose up -d --build --scale api=4
 # 扩容后需重启 nginx 让其重新解析 DNS: docker compose restart nginx
 # 若宿主机安装了 ascend-docker-runtime，可删除 devices/volumes 段，改用:
 #   runtime: ascend
 #   environment: [ ASCEND_VISIBLE_DEVICES=0 ]
 services:
   api:
-    # 版本号 = 日期（如 20261104）：IMAGE_TAG=$(date +%Y%m%d) docker compose up -d --build
-    # 不指定 IMAGE_TAG 时用已有镜像/构建出 latest
-    image: kokoro-tts-ascend:${IMAGE_TAG:-latest}
+    # 版本号 = 日期-rN（如 20261117-r8）：必须显式传 IMAGE_TAG。
+    # 不再默认 latest：本机 latest 可能指向旧代码/旧 ENV 默认（历史漂移）。
+    image: "kokoro-tts-ascend:${IMAGE_TAG:?set IMAGE_TAG=YYYYMMDD-rN}"
     build:
       context: .
       args:
-        IMAGE_VERSION: ${IMAGE_TAG:-latest}
+        IMAGE_VERSION: "${IMAGE_TAG:?set IMAGE_TAG=YYYYMMDD-rN}"
     environment:
       # WEB_CONCURRENCY 无效已删：网关进程拓扑由 supervisor 编排（GATEWAY_WORKERS），
       # 与 uvicorn 内建多 worker 无关，留着只会误导调参

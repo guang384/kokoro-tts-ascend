@@ -25,6 +25,21 @@ def test_docker_defaults_match_tunables():
     assert _docker_env("ASR_MAX_BATCH_SIZE") == tunables["ASR_MAX_BATCH_SIZE"] == "8"
 
 
+def test_every_docker_business_env_matches_registry():
+    """Dockerfile 显式设置的每个 TUNABLE 键都必须等于注册表默认值——
+    只锁四个容量键会漏掉 TTS_CHUNK_CHARS/WAIT_TIMEOUT_S 等后续漂移。"""
+    tunables = dict(proc_common.TUNABLE_PARAMS)
+    text = (_ROOT / "Dockerfile").read_text(encoding="utf-8")
+    checked = {}
+    for name, default in tunables.items():
+        m = re.search(rf"^\s*{name}=(\S+?)\s*\\?$", text, re.M)
+        if m:
+            checked[name] = m.group(1)
+    assert len(checked) >= 20, f"只解析到 {len(checked)} 个 Dockerfile ENV"
+    bad = {k: (v, tunables[k]) for k, v in checked.items() if v != tunables[k]}
+    assert not bad, f"Dockerfile 与注册表默认值漂移: {bad}"
+
+
 def test_env_helpers_default_from_registry(monkeypatch):
     """env_* 助手省略 default 参数时查 TUNABLE_PARAMS——默认值单一来源，
     同一 env 的默认全仓库只写一处（调用点不再各写一份字面量）。"""

@@ -14,7 +14,18 @@ spec:
     spec:
       containers:
       - name: kokoro
-        image: harbor:5000/kokoro-tts-ascend:20261116-r7
+        # 发布时将该 tag push 到 harbor；npu_prep 只接受带 8 位日期的 tag
+        image: harbor:5000/kokoro-tts-ascend:20261117-r8
+        # 容量默认值显式钉住：避免基底镜像 ENV 或后续默认调整改变单卡占用
+        env:
+        - name: TTS_WORKERS
+          value: "4"
+        - name: ASR_WORKERS
+          value: "4"
+        - name: TTS_MAX_BATCH_SIZE
+          value: "8"
+        - name: ASR_MAX_BATCH_SIZE
+          value: "8"
         resources:
           requests:
             cpu: "32"

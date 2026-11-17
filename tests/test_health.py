@@ -391,8 +391,9 @@ def test_shm_usage_exposed(gw, monkeypatch):
 
 
 def test_orphan_age_floor_covers_both_waits():
-    """回收线不低于 2×WAIT+60：/tts 音频等待 + 时间戳等待串行 = 块的最长
-    合法持有期；显式配小会被公式抬高（防误扫活块）。"""
+    """回收线不低于 2×WAIT+60：/tts 音频+时间戳共享同一截止线，块最长
+    合法持有期 ≤WAIT；公式保留历史更保守余量，显式配小会被抬高
+    （防误扫活块）。"""
     assert gateway_state.SHM_ORPHAN_MAX_AGE_S >= 2 * gateway_state._entry_wait_s + 60
 
 

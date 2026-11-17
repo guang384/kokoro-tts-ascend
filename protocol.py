@@ -90,14 +90,22 @@ def normalize_overrides(overrides) -> dict:
         raise ValueError(f"g2p_overrides 词条过多（{len(overrides)} > {_OVR_MAX_WORDS}）")
     out = {}
     for word, val in overrides.items():
-        w = (word or "").strip()
+        if not isinstance(word, str):
+            raise ValueError(f"g2p_overrides 词组必须是字符串: {word!r}")
+        w = word.strip()
         if not (1 <= len(w) <= _OVR_MAX_WORD_CHARS) or any(c.isspace() for c in w):
             raise ValueError(
                 f"g2p_overrides 词组非法: {word!r}（1-{_OVR_MAX_WORD_CHARS} 字符且不含空白）")
         if not _OVR_WORD_RE.fullmatch(w):
             raise ValueError(
                 f"g2p_overrides[{w!r}] 词组须为纯常用汉字（英文/数字/生僻字无法覆盖）")
-        pys = val.split() if isinstance(val, str) else list(val or [])
+        if isinstance(val, str):
+            pys = val.split()
+        elif isinstance(val, (list, tuple)):
+            pys = list(val)
+        else:
+            raise ValueError(
+                f"g2p_overrides[{w!r}] 拼音必须是字符串或列表，得到 {type(val).__name__}")
         pys = [str(p).strip().lower() for p in pys if str(p).strip()]
         if not pys:
             raise ValueError(f"g2p_overrides[{w!r}] 缺少拼音")

@@ -5,11 +5,11 @@
 # 从 arm64 镜像取文件。
 #
 # 用法：
-#   bash scripts/extract_cpu_assets.sh [--image TAG] [--out DIR] [--tar FILE]
-# 默认：--image kokoro-tts-ascend:latest --out cpu-e2e-assets
+#   bash scripts/extract_cpu_assets.sh --image <日期tag> [--out DIR] [--tar FILE]
+# 必须显式指定 --image（或 IMAGE env）：不再默认 latest，避免从旧镜像取资产。
 set -euo pipefail
 
-IMAGE="kokoro-tts-ascend:latest"
+IMAGE="${IMAGE:-}"
 OUT="cpu-e2e-assets"
 TAR=""
 
@@ -22,6 +22,11 @@ while [ $# -gt 0 ]; do
         *) echo "unknown arg: $1" >&2; exit 2 ;;
     esac
 done
+
+if [ -z "$IMAGE" ]; then
+    echo "必须用 --image 指定带模型资产的日期镜像（如 kokoro-tts-ascend:20261117-r8）" >&2
+    exit 2
+fi
 
 if [ -n "$TAR" ]; then
     echo "[assets] docker load -i $TAR"

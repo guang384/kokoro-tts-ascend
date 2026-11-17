@@ -142,6 +142,24 @@ def test_heartbeat_loop_warns_on_consecutive_failures(monkeypatch, tmp_path, cap
     assert 2 <= len(warns) <= 10, f"告警节奏异常: {len(warns)}"
 
 
+def test_heartbeat_loop_survives_initial_mkdir_failure(monkeypatch, tmp_path):
+    """初始建健康目录失败不能杀死心跳线程：旧实现裸 os.makedirs 抛
+    OSError → 线程静默死亡；修复后进入告警循环，下一轮 write 继续重试。"""
+    def _boom(*_a, **_k):
+        raise OSError("permission denied")
+
+    monkeypatch.setattr(heartbeat.os, "makedirs", _boom)
+    monkeypatch.setattr(heartbeat, "write_heartbeat", _boom)
+    stop = threading.Event()
+
+    def _sleep(_interval):
+        stop.set()   # 首轮失败后立刻要求退出，验证函数本身没有先抛
+
+    monkeypatch.setattr(heartbeat.time, "sleep", _sleep)
+    proc_common.heartbeat_loop("tts-x", 1, dict, str(tmp_path),
+                               interval=0.01, stop=stop)
+
+
 
 # ── 加载重试骨架：指数退避 5s→120s（防瞬态失败紧循环）──
 

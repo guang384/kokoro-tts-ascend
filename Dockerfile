@@ -8,7 +8,7 @@ ARG BASE_IMAGE=swr.cn-south-1.myhuaweicloud.com/ascendhub/torch-npu:2.14.0-cann9
 # 构建期 pip 走国内源；模型走 hf-mirror
 ARG PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/
 ARG HF_ENDPOINT_BUILD=https://hf-mirror.com
-# 镜像版本号：构建时传 --build-arg IMAGE_VERSION=$(date +%Y%m%d)，同步烧进镜像与 /health
+# 镜像版本号：构建时传 --build-arg IMAGE_VERSION=$(date +%Y%m%d)-rN，同步烧进镜像与 /health
 ARG IMAGE_VERSION=dev
 
 FROM ${BASE_IMAGE}

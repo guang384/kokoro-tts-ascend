@@ -48,7 +48,7 @@ def check_devices():
     add(OK if devs else WARN, "davinci 节点", ",".join(sorted(devs)) or "未发现")
 
 
-# ── 2. npu-smi：驱动存活 + 卡号解析（与 pipeline._smi_card_ids 同算法）──
+# ── 2. npu-smi：驱动存活 + 卡号解析（与 npu_ops._smi_card_ids 同算法）──
 _SMI_CARD_RE = re.compile(r"(?:Ascend|\d{3}[A-Za-z]\d?)")
 
 
