@@ -5,6 +5,7 @@
     python scripts/benchmark.py --url http://127.0.0.1:5174 -c 1,2,4,8 -n 16
     python scripts/benchmark.py --url http://127.0.0.1:5174 -c 4 --random 50 --voice zm_001
     python scripts/benchmark.py --url http://127.0.0.1:5174 -c 4 --text "更长的一段中文……" --voice zm_001
+    python scripts/benchmark.py --url http://127.0.0.1:5174 -c 4 --text-file corpus.txt --voice zm_001
 
 指标:
     req/s          每秒完成的请求数
@@ -13,10 +14,13 @@
     mean/p95       请求延迟
 
 注意：服务端 g2p 句子级 LRU 缓存（G2P_CACHE_SIZE）会让固定 --text 的压测
-全部命中缓存、吞吐虚高——测真实路径请用 --random N（N 条互不相同文本轮转）。
+全部命中缓存、吞吐虚高——测真实路径请用 --random N（N 条互不相同文本轮转）
+或 --text-file（从自备文档随机摘录，UTF-8/GBK 编码自适应；压测开始前校验
+文档可读、非空、长度 ≥ --max-chars，否则报错退出）。
 """
 import argparse
 import asyncio
+import bisect
 import math
 import random
 import statistics
@@ -67,7 +71,7 @@ def random_texts(n: int, seed: int = 20261108, max_chars: int = 800) -> list:
         return _multi_sentence(rng.randint(120, 320), 2, 6)
 
     def _xlong():
-        return _multi_sentence(rng.randint(400, max_chars), 3, 8)
+        return _multi_sentence(rng.randint(min(400, max_chars), max_chars), 3, 8)
 
     # 分层配额：20% 短 / 40% 中 / 28% 长 / 12% 超长（n 小时各层保底 1 条）
     quotas = {"s": max(1, n * 20 // 100), "m": max(1, n * 40 // 100),
@@ -87,6 +91,103 @@ def random_texts(n: int, seed: int = 20261108, max_chars: int = 800) -> list:
                 break
         else:            # 该层撞重（几乎不可能）：退中层
             out.append(_medium())
+    return out
+
+
+def load_doc(path: str, max_chars: int = 800) -> str:
+    """读取并校验压测语料文档（任何网络动作之前调用，失败即退出）。
+
+    - 文件不存在 → OSError；编码自适应：先 utf-8-sig（容 BOM），失败再
+      gb18030（GBK/GB2312 的超集，中文 Windows 导出的 GBK 文档全覆盖）；
+      两者都失败 → ValueError（消息写明已尝试的编码）
+    - 规范 \\r\\n/\\r → \\n 并 strip 首尾空白；空文档 → ValueError
+    - 长度 < max_chars → ValueError：超长层（400~max_chars）摘不出来，
+      宁可不跑也不静默降级；文档偏短可调低 --max-chars
+    """
+    with open(path, "rb") as f:
+        raw = f.read()
+    doc = None
+    for enc in ("utf-8-sig", "gb18030"):
+        try:
+            doc = raw.decode(enc)
+            break
+        except UnicodeDecodeError:
+            continue
+    if doc is None:
+        raise ValueError(f"无法解码（已尝试 UTF-8 与 GBK/gb18030），"
+                         f"前 16 字节={raw[:16]!r}")
+    doc = doc.replace("\r\n", "\n").replace("\r", "\n").strip()
+    if not doc:
+        raise ValueError("文档为空（或仅含空白/ BOM）")
+    if len(doc) < max_chars:
+        raise ValueError(f"文档太短（{len(doc)} 字符 < 摘录上限 {max_chars}）："
+                         f"超长层 400~{max_chars} 字摘不出来，请换更长文档"
+                         f"或调低 --max-chars")
+    return doc
+
+
+def file_texts(path: str, n: int, seed: int = 20261108, max_chars: int = 800,
+               doc: str | None = None) -> list:
+    """从自备 txt 文档随机摘录 n 条压测文本：随机起点 × 分层随机长度。
+
+    与 random_texts 共用长短分层（20% 短 / 40% 中 / 28% 长 / 12% 超长，
+    n 小时各层保底 1 条）、固定 seed 复现与互异去重语义，区别只在内容
+    来源：真实文档语料替代词表拼接——音素分布、句长节奏、标点密度都更
+    接近生产流量。
+
+    摘录对齐句边界：起点回退到句首（前一个句末标点/换行之后）、终点
+    对齐最近句末标点（。！？；\\n，先回退、句内无标点再向后延伸，延伸
+    上限 start+max_chars）——保证长单可被 g2p 按句切组（与 random_texts
+    按句构造契约一致），且任何摘录 ≤ max_chars。去重重试 64 次后允许
+    重复（文档句式重复的客观限制，main 在 desc 行提示互异数），但绝不
+    返回空串。
+
+    doc：已由 load_doc 预检的文档全文（main 传入避免二次读盘）；None
+    则内部自行 load_doc。"""
+    if doc is None:
+        doc = load_doc(path, max_chars)
+    rng = random.Random(seed)
+    # 句末位置索引（含换行——g2p 切句同样认 \n）：二分定位句首/句末
+    ends = [i for i, ch in enumerate(doc) if ch in _ENDINGS or ch == "\n"]
+
+    def _excerpt(lo: int, hi: int) -> str:
+        # 层内随机长度（两层都钳到 max_chars：--max-chars < 400 时超长层收窄）
+        lo, hi = min(lo, max_chars), min(hi, max_chars)
+        if hi < lo:
+            lo = hi
+        size = rng.randint(lo, hi)
+        pos = rng.randint(0, len(doc) - size)          # 随机起点
+        j = bisect.bisect_left(ends, pos)              # 回退到句首
+        start = ends[j - 1] + 1 if j > 0 else 0
+        end = min(start + size, len(doc))
+        if doc[end - 1] not in _ENDINGS and doc[end - 1] != "\n":
+            k = bisect.bisect_left(ends, end)          # 终点先回退到前一句末
+            if k > 0 and ends[k - 1] > start:
+                end = ends[k - 1] + 1
+            elif k < len(ends):                        # 句内无句末标点：向后延伸
+                nxt = ends[k] + 1
+                if nxt - start <= max_chars:
+                    end = nxt
+        return doc[start:end].strip()
+
+    # 分层配额：与 random_texts 同比例（20% 短 / 40% 中 / 28% 长 / 12% 超长）
+    sizes = ([(1, 8)] * max(1, n * 20 // 100) + [(8, 24)] * max(1, n * 40 // 100)
+             + [(120, 320)] * max(1, n * 28 // 100)
+             + [(400, max_chars)] * max(1, n * 12 // 100))
+    sizes = (sizes + [(8, 24)] * n)[:n]   # 配额取整损耗用中层补齐/截断
+    rng.shuffle(sizes)                    # 打散长度顺序：避免同长度扎堆
+
+    out, seen = [], set()
+    for lo, hi in sizes:
+        t = ""
+        for _attempt in range(64):
+            t = _excerpt(lo, hi)
+            if t and t not in seen:
+                break
+        if not t:   # 重试耗尽（文档句式重复/极端空白）：允许重复，绝不返回空串
+            t = doc[:ends[0] + 1].strip() if ends else doc[:8]
+        seen.add(t)
+        out.append(t)
     return out
 
 
@@ -223,7 +324,15 @@ async def main():
                                      "支持全场景人工智能应用。今天我们来测试语音合成的并发吞吐能力。")
     ap.add_argument("--random", type=int, default=0, metavar="N",
                     help="改用 N 条互不相同的随机文本轮转（推荐：固定 --text 会全部"
-                         "命中 g2p 句子缓存，吞吐虚高、测不到真实路径）")
+                         "命中 g2p 句子缓存，吞吐虚高、测不到真实路径；"
+                         "--text-file 模式下亦作摘录条数，未给默认 50）")
+    ap.add_argument("--text-file", default="", metavar="PATH",
+                    help="从自备 txt 文档随机摘录压测文本（随机位置×分层随机长度，"
+                         "起止对齐句末标点；UTF-8/GBK 编码自适应）。压测开始前校验："
+                         "可读、非空、长度 ≥ --max-chars，否则报错退出")
+    ap.add_argument("--max-chars", type=int, default=800, metavar="N",
+                    help="摘录/超长层的长度上限（= --text-file 要求的最小文档长度），"
+                         "默认 800；文档偏短时可调低")
     ap.add_argument("--voice", default="zf_001")
     ap.add_argument("--speed", type=float, default=1.0,
                     help="语速；探显存上界用 0.5（帧数翻倍的最坏情况）")
@@ -239,8 +348,26 @@ async def main():
                          "关闭竞态；此开关用于对比测量竞态本身的影响）")
     args = ap.parse_args()
 
-    if args.random > 0:
-        texts = random_texts(args.random)
+    if args.max_chars < 1:
+        sys.exit("--max-chars 必须 ≥ 1")
+    if args.text_file:
+        count = args.random if args.random > 0 else 50
+        try:
+            # 预检先行（load_doc 抛 OSError/ValueError → 退出码 1），再摘录
+            doc = load_doc(args.text_file, args.max_chars)
+            texts = file_texts(args.text_file, count,
+                               max_chars=args.max_chars, doc=doc)
+        except (OSError, ValueError) as exc:
+            sys.exit(f"--text-file {args.text_file}: {exc}")
+        lens = sorted(len(t) for t in texts)
+        dup = len(texts) - len(set(texts))
+        dup_note = (f"，互异 {len(texts) - dup}/{len(texts)}（文档句式重复，"
+                    f"g2p 缓存命中会虚高吞吐）" if dup else "")
+        desc = (f"文档摘录 x{len(texts)}（{args.text_file} 共{len(doc)}字符，"
+                f"随机位置×随机长度{dup_note}，轮转打穿 g2p 缓存）"
+                f"  长度 min/中位/max={lens[0]}/{lens[len(lens) // 2]}/{lens[-1]} 字")
+    elif args.random > 0:
+        texts = random_texts(args.random, max_chars=args.max_chars)
         lens = sorted(len(t) for t in texts)
         desc = (f"随机文本 x{len(texts)}（互异长短混合，轮转打穿 g2p 缓存）"
                 f"  长度 min/中位/max={lens[0]}/{lens[len(lens) // 2]}/{lens[-1]} 字")

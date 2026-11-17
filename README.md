@@ -245,6 +245,13 @@ q_asr 排队 EMA 上来就 `ASR_WORKERS`+1 或 `ASR_MAX_BATCH_SIZE`+，线性模
 # 随机长短混合文本（必须：固定文本会命中 g2p 缓存虚高）
 docker exec kokoro-tts python /opt/benchmark.py \
   --url http://127.0.0.1:5174 --endpoint tts -c 1,2,4,8 -n 32 --random 50
+
+# 真实语料压测：从自备 txt 文档随机摘录（随机位置×分层随机长度，起止对齐
+# 句末标点；UTF-8/GBK 编码自适应）。压测开始前校验文档可读、非空、长度
+# ≥800 字（不足可 --max-chars 调低），否则报错退出。容器内需先拷入文档：
+docker cp corpus.txt kokoro-tts:/tmp/corpus.txt
+docker exec kokoro-tts python /opt/benchmark.py \
+  --url http://127.0.0.1:5174 --endpoint tts -c 1,2,4,8 -n 32 --text-file /tmp/corpus.txt
 ```
 
 显存核算（两池共居 + 吞吐档参考）：`python scripts/memcalc.py --max-batch <B> --card-gb <容量> --workers <N> --asr-workers <N>`；
