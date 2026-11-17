@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 配置矩阵基准 runbook——在真机 root shell 执行（建议于 /root/cui 下，结果落同目录）。
+# 配置矩阵基准 runbook——在真机 root shell 执行（建议在压测工作目录，如 /root/bench，结果落同目录）。
 # 用法: bash bench_matrix.sh [CARD] [IMAGE]
 #   CARD  默认 0（服务容器实际挂载的卡号，与现网一致）
 #   IMAGE 必填：要测的日期 tag（不设默认——旧镜像会测到旧代码/旧 ENV）
