@@ -99,8 +99,11 @@ def _write_own_health() -> None:
 
 def _health_dir_entries(prefixes=("worker-",), fresh_only: bool = True):
     """健康目录条目扫描 [(name, path, age_s)]：listdir + 前缀过滤 + 可选
-    新鲜度过滤。/collect 聚合、/tts 的 asr 就绪探测、心跳僵尸文件清理
+    新鲜度过滤。/collect 聚合、/tts 的 asr 就绪探测、.tmp- 残片清理
     三个读者共用——listdir+mtime+json 是同步磁盘 IO，只写一处。
+
+    worker-*.json 的删除权归 supervisor（reap_hung 依据 mtime/stuck_s
+    判决）；网关只读，避免抢删导致 supervisor 看不到 stale 证据。
 
     TOCTOU 安全：getmtime 失败的条目静默跳过（写方 os.replace 的窗口，
     生产事故 20261110：.tmp-<pid> 存在窗口毫秒级，撞上即 FileNotFoundError）。"""
@@ -111,7 +114,7 @@ def _health_dir_entries(prefixes=("worker-",), fresh_only: bool = True):
     now = time.time()
     for name in names:
         if not name.startswith(tuple(prefixes)):
-            continue  # .tmp-：写一半崩溃的残片，仅清理路径关心
+            continue
         path = os.path.join(gst._health_dir, name)
         try:
             age = now - os.path.getmtime(path)
@@ -164,6 +167,20 @@ def _shm_used_pct() -> float:
     return (_shm_stats() or {}).get("pct", -1.0)
 
 
+def _cleanup_tmp_files() -> None:
+    """只清 .tmp- 写一半的残片。worker-*.json 归 supervisor 所有：网关若按
+    stale 线抢先删除，supervisor.reap_hung 就看不到 stale 证据（文件不存在
+    ≠已死），SIGSTOP/心跳线程死亡但主循环仍活的 worker 永远不会被强杀
+    （CPU E2E 实测复现：崩溃计数不增、僵尸进程长期占位）。"""
+    for _name, path, age in _health_dir_entries(
+            prefixes=(".tmp-",), fresh_only=False):
+        if age > gst._HEALTH_STALE_AFTER:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+
+
 async def _heartbeat_loop() -> None:
     while True:
         try:  # 心跳线程绝不能死——死了会被 supervisor 判 hang 强杀
@@ -174,16 +191,7 @@ async def _heartbeat_loop() -> None:
             if pct >= 80:  # SHM 高水位：再涨就 SIGBUS（长文本 /tts 的历史根因）
                 _throttled_warn("shm", "/dev/shm 水位 %.0f%% —— 音频块写满即 SIGBUS，"
                                 "加大 --shm-size 或降低 /tts 并发", pct)
-            for name, path, age in _health_dir_entries(
-                    prefixes=("worker-", ".tmp-"), fresh_only=False):
-                # 顺带清理已死 worker 的僵尸文件；阈值对齐心跳 stale 线
-                # （30s）：supervisor 死后 /health 角色虚高窗口从 60s 减半；
-                # 活 worker 心跳 5s 一刷不会误删
-                if age > gst._HEALTH_STALE_AFTER:
-                    try:
-                        os.unlink(path)
-                    except OSError:
-                        pass
+            _cleanup_tmp_files()
         except Exception:  # noqa: BLE001
             log.exception("heartbeat/sweep error (ignored)")
         await asyncio.sleep(gst._HEALTHBEAT_INTERVAL)

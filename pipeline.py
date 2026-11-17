@@ -432,9 +432,10 @@ class TTSCompute:
                 lengths, ref_s.to(self.device), speeds.to(self.device))
         if dtype == "fp16":
             # 请求级 autocast：权重不动（fp32 常驻），浮点算子按设备支持度
-            # 自动选型（敏感算子保 fp32）。device_type 取实际设备（npu/cpu）
-            # ——CPU 上 autocast 同样生效（fp16 算子覆盖不全，仅供本地验证），
-            # 生产 NPU 由 CANN 选型
+            # 自动选型（敏感算子保 fp32）。生产 NPU 由 CANN 选型。
+            # 注意：CPU 默认复数 STFT 走 ComplexHalf 不支持的算子
+            # （exp_vml_cpu），需 KOKORO_DISABLE_COMPLEX=1 启用纯 conv STFT
+            # 后 fp16 才可用；NPU 的 auto 档已自动开启。
             dev_type = str(self.device).split(":")[0]
             with torch.autocast(device_type=dev_type, dtype=torch.float16):
                 return forward_batch(*args)

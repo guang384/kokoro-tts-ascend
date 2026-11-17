@@ -283,6 +283,11 @@ docker build -f Dockerfile.cpu -t kokoro-tts-cpu:local .
 # 2) 全量验证（构建 + 镜像内 pytest + 真实模型功能/数值门 + 故障注入）
 python3 scripts/cpu_e2e.py --assets cpu-e2e-assets
 #    分阶段：--phases baseline,numeric / --skip-build / --keep
+
+# 3) 深度行为/故障/配置矩阵（编码全格式+ffprobe、音色/语速/覆盖/精度、
+#    真实批宽、CORS/keep-alive、kill gw/asr/g2p/tts、stale 击杀、wedge、
+#    metrics off / EN off/espeak / 语速下限 / body 上限 / 全局词典 / 外部 Redis）
+python3 scripts/cpu_e2e_deep.py --skip-build --assets cpu-e2e-assets
 ```
 
 `scripts/cpu_e2e.py` 的 gate：
@@ -439,6 +444,9 @@ curl -s http://127.0.0.1:5174/v1/audio/speech -H 'Content-Type: application/json
 
 - 凑批按 (音素长度类, dtype) 隔离不混批；拉模式无等待——孤立的 fp16 请求
   立即按 B=1 执行（延迟更低），只损失单句产能效率（5% 灰度流量总损失 ~1%）。
+- **CPU 开发机注意**：默认复数 STFT 不支持 ComplexHalf，fp16 请求会 502；
+  设 `KOKORO_DISABLE_COMPLEX=1` 启用纯 conv STFT 后 fp16 可用（NPU 的 auto
+  档已自动开启，无需配置）。
 - 精度只看请求参数 `dtype`（fp32/fp16），无进程级开关——避免"以为开了
   fp16"的部署事故。
 - `scripts/ab_quality_test.py`：同文本双精度各合成一遍 → 单文件 HTML（音频

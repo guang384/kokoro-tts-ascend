@@ -567,3 +567,18 @@ def test_recent_latency_quantiles():
     assert snap["stats"]["p99_s"] == round(4.0 * 0.04 + 8.0 * 0.96, 3)  # 7.84
     gateway_state._recent_latencies.clear()
     assert "p50_s" not in gateway_obs._worker_snapshot()["stats"]
+
+def test_gateway_janitor_keeps_worker_heartbeats(gw):
+    """网关只清 .tmp- 残片，绝不删除 worker-*.json：stale 证据必须留给
+    supervisor.reap_hung，否则 SIGSTOP/心跳线程死亡的 worker 永不被强杀。"""
+    hd = gateway_state._health_dir
+    worker = os.path.join(hd, "worker-424242.json")
+    tmp = os.path.join(hd, ".tmp-424242")
+    for path in (worker, tmp):
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("{}")
+        old = time.time() - 3600
+        os.utime(path, (old, old))
+    gateway_obs._cleanup_tmp_files()
+    assert os.path.exists(worker)       # 删除权归 supervisor
+    assert not os.path.exists(tmp)
