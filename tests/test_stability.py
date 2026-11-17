@@ -142,6 +142,35 @@ def test_heartbeat_loop_warns_on_consecutive_failures(monkeypatch, tmp_path, cap
     assert 2 <= len(warns) <= 10, f"告警节奏异常: {len(warns)}"
 
 
+
+# ── 加载重试骨架：指数退避 5s→120s（防瞬态失败紧循环）──
+
+def test_retry_forever_backoff(monkeypatch):
+    """do_init 连续失败必须按 5/10/20/40/80/120/120s 退避，而不是紧循环；
+    成功后返回结果，warm 标记在失败期间为 fail。"""
+    sleeps = []
+    monkeypatch.setattr(proc_common.time, "sleep",
+                        lambda d: sleeps.append(d))
+    warm = {}
+    calls = {"n": 0}
+    logs = []
+
+    class _Log:
+        def error(self, *a, **k):
+            logs.append(a)
+
+    def _init():
+        calls["n"] += 1
+        if calls["n"] <= 7:
+            raise RuntimeError("transient")
+        return "engine"
+
+    assert proc_common.retry_forever(_init, "k", warm, "x", _Log()) == "engine"
+    assert sleeps == [5.0, 10.0, 20.0, 40.0, 80.0, 120.0, 120.0]
+    assert calls["n"] == 8 and len(logs) == 7
+    assert warm["k"] == "fail"
+
+
 # ── setup_logging 幂等（单例 tag 过滤器，不随调用堆积）──
 
 def test_setup_logging_idempotent(monkeypatch):

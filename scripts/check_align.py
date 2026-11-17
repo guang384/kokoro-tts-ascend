@@ -18,7 +18,10 @@ import math
 import struct
 import sys
 
-PATH = sys.argv[1] if len(sys.argv) > 1 else "out.json"
+STRICT = "--strict" in sys.argv[1:]
+_args = [a for a in sys.argv[1:] if not a.startswith("--")]
+PATH = _args[0] if _args else "out.json"
+problems = []
 d = json.load(open(PATH, encoding="utf-8"))
 text = d.get("text") or ""
 ts = [(int(s), int(e)) for s, e in (d.get("timestamp") or [])]
@@ -50,15 +53,21 @@ mono_bad = [(i, ts[i - 1], ts[i]) for i in range(1, len(ts))
             if ts[i][0] < ts[i - 1][1] - 1]
 print(f"时间倒退(起点<前段终点): {len(mono_bad)} 处"
       + (f"  首个@{mono_bad[0][0]}: {mono_bad[0][1]}→{mono_bad[0][2]}" if mono_bad else ""))
+if mono_bad:
+    problems.append(f"时间倒退 {len(mono_bad)} 处")
 over = [(i, ts[i][1], round(dur_ms)) for i, (s, e) in enumerate(ts) if e > dur_ms + 50]
 print(f"越界(段终点>音频时长): {len(over)} 处"
       + (f"  首个@{over[0][0]}: end={over[0][1]}ms > {over[0][2]}ms" if over else ""))
+if over:
+    problems.append(f"时间戳越界 {len(over)} 处")
 last_end = ts[-1][1] if ts else 0
 print(f"末段终点 {last_end}ms vs 音频 {dur_ms:.0f}ms → 尾部未覆盖 {dur_ms - last_end:.0f}ms")
 gaps = [(ts[i - 1][1], ts[i][0] - ts[i - 1][1], i) for i in range(1, len(ts))
         if ts[i][0] - ts[i - 1][1] > 300]
 print(f"段间大空隙(>300ms): {len(gaps)} 处"
       + ("".join(f"\n   @idx{i} 前 {p0}ms 空 {g}ms" for p0, g, i in gaps[:6]) if gaps else ""))
+if gaps:
+    problems.append(f"段间空隙 >300ms: {len(gaps)} 处")
 
 # ── B. 能量检查 ──
 print("\n== B. 能量（逐段 RMS）==")
@@ -70,6 +79,8 @@ silent = [(i, seg_rms[i]) for i, r in enumerate(seg_rms) if r < thr]
 print(f"全局 RMS={global_rms:.0f}  静音阈值={thr:.0f}")
 print(f"有文字却近静音的段: {len(silent)}/{len(ts)}"
       + (f"  前 8 个 idx: {[i for i, _ in silent[:8]]}" if silent else ""))
+if silent:
+    problems.append(f"有文字但近静音 {len(silent)} 段")
 head_sil = ts[0][0] if ts else 0
 tail_sil = dur_ms - last_end
 print(f"首部静音(音频起点→首段起点): {head_sil:.0f}ms   尾部静音: {tail_sil:.0f}ms")
@@ -88,6 +99,8 @@ if dur_ms - cur > 300:
         holes.append((round(cur), round(dur_ms - cur)))
 print(f"有声音但无时间戳覆盖的区间: {len(holes)} 处"
       + ("".join(f"\n   起点 {p}ms 长 {g}ms" for p, g in holes[:6]) if holes else ""))
+if holes:
+    problems.append(f"有声无时间戳覆盖 {len(holes)} 处")
 
 # ── C. 文本↔时长换算 ──
 print("\n== C. 文本↔时长 ==")
@@ -98,7 +111,18 @@ print(f"Σ段时长 {speech_ms:.0f}ms  文本 {len(text)} 字 → {rate:.2f} 字
 n_align = sum(1 for c in text if (c.isascii() and c.isalnum())
               or '\u4e00' <= c <= '\u9fff')
 print(f"可对齐字符≈{n_align} vs 时间戳 {len(ts)} 段（差 {len(ts) - n_align}）")
+if len(ts) != n_align:
+    problems.append(f"时间戳段数 {len(ts)} != 可对齐字符 {n_align}")
 per = [((e - s) / 1000, i) for i, (s, e) in enumerate(ts)]
 outliers = [(i, d_ms) for d_ms, i in per if d_ms > 1.5]
 print(f"超长段(>1.5s): {len(outliers)} 段"
       + ("".join(f"\n   idx{i} {d_ms:.2f}s" for i, d_ms in outliers[:6]) if outliers else ""))
+
+if STRICT:
+    print("\n== STRICT 判定 ==")
+    if problems:
+        for p in problems:
+            print(f"  FAIL  {p}")
+        sys.exit(1)
+    print("  PASS  结构/能量/段数契约全部通过")
+

@@ -105,3 +105,5 @@ def retry_forever(do_init, warm_key: str, warm: dict, what: str,
             log_fn.error("%s init failed, retry in %.0fs (warm=fail → /health"
                          " 503 → orchestration restarts container): %s",
                          what, delay, str(exc)[:200])
+            time.sleep(delay)
+            delay = min(delay * 2, 120.0)
