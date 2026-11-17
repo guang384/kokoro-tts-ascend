@@ -53,7 +53,15 @@ ENV PIP_INDEX_URL=${PIP_INDEX_URL} \
 # 之后才参与缓存键，放末层使改 tag 不再重建 pip/模型下载层）
 LABEL org.opencontainers.image.title="kokoro-tts-ascend"
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# apt 走国内镜像源：ports.ubuntu.com 国际直连在本环境仅 ~100kB/s，单个 apt
+# 层 15+ 分钟（Jammy arm64 全部条目都在 ubuntu-ports；x86 的 archive/security
+# host 一并覆盖仅作兜底，arm64 镜像里通常不存在）。Release 文件有 GPG 签名，
+# http 传输不构成完整性风险；换源只影响构建期，与运行时无关。
+RUN sed -i 's|http://ports.ubuntu.com/ubuntu-ports|http://mirrors.aliyun.com/ubuntu-ports|g; \
+        s|http://archive.ubuntu.com/ubuntu|http://mirrors.aliyun.com/ubuntu|g; \
+        s|http://security.ubuntu.com/ubuntu|http://mirrors.aliyun.com/ubuntu|g' \
+        /etc/apt/sources.list \
+    && apt-get update && apt-get install -y --no-install-recommends \
         espeak-ng ffmpeg curl redis-server \
     && rm -rf /var/lib/apt/lists/*
 
