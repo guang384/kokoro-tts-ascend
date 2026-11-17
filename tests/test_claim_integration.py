@@ -269,8 +269,7 @@ def test_requeue_worker_enforces_max_redispatch(redis_proc, cq):
 
 def test_claim_drops_corrupt_member(redis_proc, cq):
     """真损坏 member（新旧两种头都解不出）：认领侧丢弃不炸 worker——
-    否则每轮认领→崩→重派循环（put_nowait 事故同构）。旧 22B 格式
-    member 不在此列（decode_member 单向兼容，见下个用例）。"""
+    否则每轮认领→崩→重派循环（put_nowait 事故同构）。"""
     client = _redis()
     # 手工塞一个坏 member（合法 ZSET 成员、载荷错位）
     bad = (struct.pack(">H", 30) + b"0" + b"00000000000000001234"
@@ -281,39 +280,6 @@ def test_claim_drops_corrupt_member(redis_proc, cq):
     assert client.zcard(cq._key) == 0           # 队列清掉（不再循环炸）
     assert client.zcard(f"{cq._key}:infl:tts-0-7") == 0  # 在途账本同步清
     assert cq.stats()["bad"] == 1               # 计数可见
-
-
-def _legacy_member(rid="legacy", ps=30, seq=1234):
-    """旧版本 member 格式：2B 音素数 + 20B 序号 + pickle（无精度字节）。"""
-    chunk = {"req_id": rid, "idx": 0, "ps": "ə" * ps, "voice": "zf_001",
-             "speed": 1.0, "origin": 0, "need": 1, "text": "句",
-             "needs_align": False}
-    return (struct.pack(">H", ps) + f"{seq:020d}".encode()
-            + pickle.dumps(chunk))
-
-
-def test_claim_accepts_legacy_22b_member(redis_proc, cq):
-    """升级期单向兼容：新版本能消费旧 22B 头 member（无 dtype → 下游按
-    fp32 处理），而不是丢弃让请求干等 WAIT_TIMEOUT 才 504。"""
-    client = _redis()
-    client.zadd(cq._key, {_legacy_member(): 1234})
-    claimed = cq.claim(4, "tts-0-9")
-    assert len(claimed) == 1
-    m, chunk = claimed[0]
-    assert chunk["req_id"] == "legacy" and chunk["dtype"] == "fp32"
-    assert cq.stats()["bad"] == 0
-    assert cq.ack([m], "tts-0-9") == 1
-
-
-def test_requeue_worker_accepts_legacy_inflight(redis_proc, cq):
-    """旧 worker 升级前认领的 legacy member 留在 infl 账本里：新版本
-    精确重派时按旧头解出 seq 回队列（不被当坏块丢弃）。"""
-    legacy = _legacy_member("legacy-infl", seq=4321)
-    _redis().zadd(f"{cq._key}:infl:tts-0-7", {legacy: 1})
-    assert cq.requeue_worker("tts-0-7") == 1
-    assert cq.depth() == 1 and cq.stats()["bad"] == 0
-    claimed = cq.claim(4, "tts-0-9")
-    assert len(claimed) == 1 and claimed[0][1]["req_id"] == "legacy-infl"
 
 
 def test_asr_queue_batch_claim_and_ack(redis_proc, cq):

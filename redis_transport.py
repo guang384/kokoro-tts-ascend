@@ -3,8 +3,6 @@
 proc_common 拆分出的队列传输（唯一跨进程通道）。队列方法内的
 _make_redis_client 从本模块全局解析——测试兜底请 patch 本模块。
 """
-import logging
-import os
 import pickle
 import queue
 import struct
@@ -13,16 +11,29 @@ import time
 
 import redis
 
-from config import env_int, _qlog
+from config import env_int, env_str, _qlog
 
-IPC_REDIS_SOCKET = os.getenv("IPC_REDIS_SOCKET", "/tmp/kokoro-redis.sock")
+# ── 传输层：Redis 队列（唯一传输，redis-server 由 supervisor 子进程托管）──
+# 三段事故史，为什么最后落在 Redis：
+#   1) mp.Queue：锁是 POSIX 信号量（非 robust），进程持锁瞬间被 SIGKILL
+#      （OOM killer/看门狗强杀）→ 信号量永不释放 → 全员 get() 永久阻塞；
+#      feeder 线程被杀还会撕裂帧。锁在 C 层共享内存里，Python 层无解
+#      （20261108 生产事故）。
+#   2) ZeroMQ PUSH/PULL：broker 按 round-robin 预分配消息给 worker 管道，
+#      消费者 RCVHWM=1 时轮询落到忙 worker 的满管道 → 阻塞单线程转发，
+#      其余空闲 worker 饿死（队头阻塞，实测吞吐 -30%）；且计数器跨进程
+#      RMW 丢更新 → depth/in/out 幻影（20261110：57/113 条"幽灵积压"）。
+#   3) Redis（现状）：消息常驻服务端（worker 死亡队列零丢失，其他 worker
+#      接手）、LPOP 拉取 = 真 demand-pull（谁空闲谁取，无预分配无队头
+#      阻塞）、LLEN/INCR 服务端单线程原子（depth 与计数永不失配）。
+IPC_REDIS_SOCKET = env_str("IPC_REDIS_SOCKET")   # 默认值查 TUNABLE_PARAMS 注册表
 # 外部 redis 模式（IPC_REDIS_URL=tcp://host:port）：不拉起 server、直连
 # ——dev/Windows 验证与多副本共享 redis 用；生产留空走 unix socket 自拉
-IPC_REDIS_URL = (os.getenv("IPC_REDIS_URL") or "").strip()
+IPC_REDIS_URL = env_str("IPC_REDIS_URL")
 TTS_BATCH_BUCKET_CHARS = env_int("TTS_BATCH_BUCKET_CHARS", minimum=8)  # 认领类宽（音素）
 # asr 对齐作业的单组音频秒上限：组由此硬封顶（g2p._chunk_cap 语速感知切句
 # + funasr_ts._split_groups 超长硬切两层保证），asr 显存预算按它算最坏
-# encoder 帧数（pipeline._asr_auto_budget_mb；g2p._chunk_cap 取本值−2s 为
+# encoder 帧数（npu_ops._asr_auto_budget_mb；g2p._chunk_cap 取本值−2s 为
 # 切句目标）。生产派发点（compute 的 asr_job 构造）显式传本值；
 # protocol.asr_job 的 30.0 默认仅兜缺字段。
 # 非可调配参数：改它会同时改变切句粒度、切组粒度与预算峰值，需同步评审。
@@ -33,7 +44,7 @@ _CLAIM_POLL_S = 0.01    # 容量门等待与空认领轮询间隔
 _REDIS_POLL_S = 0.01   # 出队轮询间隔（无 BLPOP：消息交接延迟 ≤10ms，量级无感）
 
 
-_SHARED_REDIS = None   # 进程级共享客户端（cancel SET 等无队列归属的操作用）
+_SHARED_REDIS = None   # 进程级共享客户端（cancel 标记等无队列归属的操作用）
 
 
 def decode_member(m):

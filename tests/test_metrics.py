@@ -105,7 +105,7 @@ def test_metrics_format_and_families(gw, monkeypatch):
     assert 'kokoro_request_duration_p99_seconds 4.9' in text
     # 队列 label
     assert 'kokoro_queue_depth{stage="g2p"} 3.0' in text
-    # 坏 member 计数（滚动升级/载荷损坏信号；无则 0）
+    # 坏 member 计数（载荷损坏/外部误写信号；无则 0）
     assert 'kokoro_queue_bad_total{stage="g2p"} 0.0' in text
     # worker label + 崩溃计数（来自 supervisor crashes 映射）
     assert 'kokoro_worker_crashes_total{worker="tts-0"} 2.0' in text

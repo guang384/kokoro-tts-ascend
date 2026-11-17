@@ -1,6 +1,6 @@
 """gateway 观测层：心跳/僵尸清理、/health 全量聚合、Prometheus 指标数据面。
 
-从 gateway 拆出的可观测性关注面；状态经 gateway_state(st) 模块属性访问，
+从 gateway 拆出的可观测性关注面；状态经 gateway_state(gst) 模块属性访问，
 聚合引擎经 gateway_agg 模块属性调用（patch 可见）。路由层（/health /metrics
 端点本体）在 gateway.py。
 """
@@ -12,12 +12,12 @@ import os
 import time
 
 import proc_common
-import protocol
 
 import gateway_agg
 import gateway_state as gst
 
 log = logging.getLogger("kokoro.server")
+
 
 def _snapshot_window(win) -> list:
     """deque → list 的突变容忍拷贝：/health、/metrics 已下放线程池，快照
@@ -105,7 +105,7 @@ def _health_dir_entries(prefixes=("worker-",), fresh_only: bool = True):
     TOCTOU 安全：getmtime 失败的条目静默跳过（写方 os.replace 的窗口，
     生产事故 20261110：.tmp-<pid> 存在窗口毫秒级，撞上即 FileNotFoundError）。"""
     try:
-        names = os.listdir(gst._health_dir)
+        names = sorted(os.listdir(gst._health_dir))   # 排序：/health 与指标输出确定性
     except OSError:
         return   # 目录瞬时不可用（人工清理/挂载抖动）：本轮空，5s 后自愈
     now = time.time()
@@ -464,9 +464,7 @@ def health_payload() -> dict:
     }
 
 
-# ── 探针端点：/health（三探针共用，业界习惯）+ /metrics（指标）──
-# 未就绪（能力未齐）→ 503：readiness 摘流量；预热期 liveness 由 startupProbe
-# 宽限保护。degraded 是可服务态 → 200，不触发重启。
+# ── 健康聚合与指标数据面（HTTP 路由在 gateway.py：/health、/metrics）──
 
 
 if gst.METRICS_ENABLED:

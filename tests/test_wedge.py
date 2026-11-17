@@ -8,7 +8,6 @@ import json
 import os
 
 import pytest
-import gateway_obs
 
 import supervisor
 
@@ -263,7 +262,7 @@ def test_respawn_failure_keeps_retry_slot(monkeypatch, tmp_path):
 
 def test_queue_bad_increment_warns(monkeypatch):
     """坏 member 增量告警不依赖 METRICS_ENABLED：首轮记基线，之后每次
-    增量一条 WARNING（同值不重复）——滚动升级/载荷损坏的主动信号。"""
+    增量一条 WARNING（同值不重复）——载荷损坏/外部误写的主动信号。"""
     import supervisor
 
     class Q:
@@ -291,7 +290,6 @@ def test_queue_bad_increment_warns(monkeypatch):
 def test_check_redis_revives_dead_server(monkeypatch):
     """自愈链④的守护锁定：redis-server 单独死亡（supervisor 存活的窄窗口）
     → 自动重启；队列重置为已知边界（请求 504 兜底）。"""
-    import proc_common
     import redis_transport
     import supervisor
 

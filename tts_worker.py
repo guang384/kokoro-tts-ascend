@@ -1,5 +1,5 @@
 """tts 推理 worker：KModel 加载 → 认领组批 → 批前向 → SHM 写回 + ASR 派发。"""
-import logging
+import os
 import sys
 import time
 import uuid
@@ -7,11 +7,10 @@ import uuid
 import proc_common
 import protocol
 
-import worker_common
 from worker_common import (SAMPLE_RATE, _MAX_BATCH, _busy, _chunk_key,
-                           _log_mem_sample, _queue_ms, _reqs_list,
-                           _sample_worker_npu_mem, _snapshot_base, _stats,
-                           _tts_warm, _with_busy, group_by_request)
+                           _queue_ms, _reqs_list, _sample_worker_npu_mem,
+                           _snapshot_base, _stats, _tts_warm, _with_busy,
+                           group_by_request)
 
 _WIN_SHM_KEEPALIVE = []  # Windows 冒烟：写侧留置的 SHM 句柄（防命名映射提前销毁）
 
@@ -143,7 +142,7 @@ def ship_batch(compute, batch: dict, gateway_queues, asr_queue, log,
                 shm.buf[off:off + a.nbytes] = memoryview(a).cast("B")
                 seg = {"idx": idx_, "offset": off,
                        "samples": a.shape[0], "text": c.get("text", "")}
-                # 网关据此算请求级 q_tts 跨度；旧消息/chunk 无字段则缺省
+                # 网关据此算请求级 q_tts 跨度；缺戳 chunk（外部直写）则缺省
                 if isinstance(c.get("_q_enq"), (int, float)):
                     seg["q_enq"] = c["_q_enq"]
                 if isinstance(c.get("_q_claim"), (int, float)):

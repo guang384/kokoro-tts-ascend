@@ -1,23 +1,19 @@
 """asr 对齐 worker：FunASR 加载 → 认领桶批 → 词级时间戳回投 origin 网关。"""
-import logging
 import os
-import re
 import time
 
+import npu_ops
 import proc_common
-import protocol
 
-import worker_common
 from worker_common import (SAMPLE_RATE, _ASR_MAX_BATCH, _busy, _chunk_key,
                            _queue_ms, _looks_like_oom, _reply_chunk_ts_safe,
                            _sample_worker_npu_mem, _snapshot_base, _stats,
                            _with_busy, _asr_warm)
 
+
 def _sample_asr_mem() -> None:
     """asr 不跑批量前向之外的持续负载，采样点放在加载完成与每批推理之后；
     空闲期沿用最后一次快照（内存预占恒定，不会漂移）。"""
-    import npu_ops
-
     meta = npu_ops.asr_budget_meta()
     _sample_worker_npu_mem(_asr_state.get("device"),
                            meta[0] if meta else None,
@@ -146,7 +142,7 @@ def _run_asr_batch(jobs: list, gateway_queues, log, bid: str = "") -> None:
         # 不能让整批（含其他请求的合法 job）落到 asr_main 外层 except 被
         # 整批丢弃——坏 job 单独回 error，其余照常推理。
         try:
-            rate = int(job.get("sample_rate") or 24000)
+            rate = int(job.get("sample_rate") or SAMPLE_RATE)
             mgs = float(job.get("max_group_sec")
                         or proc_common.ASR_MAX_GROUP_SEC)
         except (TypeError, ValueError) as exc:
@@ -303,7 +299,3 @@ def asr_main(idx: int, claim_queue, gateway_queues) -> None:
             claim_queue.ack(members, worker_id)  # 交付确认（in-flight 移除）
             _sample_asr_mem()                    # 每批后刷新内存快照
             _busy.exit()
-
-
-
-# 实际由 supervisor 调用 tts_main/asr_main

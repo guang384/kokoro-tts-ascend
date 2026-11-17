@@ -321,7 +321,7 @@ _bad_seen = {"n": None}     # 上轮坏 member 累计（增量告警基线）
 
 def _watch_queue_bad() -> None:
     """坏 member 增量告警（不依赖 METRICS_ENABLED）：每轮汇总 tts/asr 两条
-    认领队列的累计计数，增量出现即 WARNING——滚动升级混跑/载荷损坏唯一的
+    认领队列的累计计数，增量出现即 WARNING——载荷损坏/外部误写唯一的
     主动信号；首轮只记基线（容器刚起时计数可能已非零）。"""
     if _tts_queue is None and _asr_queue is None:
         return

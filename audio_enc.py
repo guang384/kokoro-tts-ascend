@@ -1,14 +1,13 @@
 """gateway 音频编码：WAV/FLAC/PCM 直出 + ffmpeg 系封装 + chunk 拼接。"""
 import io
 import subprocess
-import time
-
 from typing import List
 
 import numpy as np
 import soundfile as sf
 
 import gateway_state as gst
+
 
 def _concat(parts: List[np.ndarray]) -> np.ndarray:
     """拼接句音频（PCM16），句间补 60ms 静音；恒定返回自有数组。

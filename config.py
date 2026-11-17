@@ -6,6 +6,7 @@ KOKORO_HEALTH_DIR 单一来源也在此（全仓库 import proc_common 即传导
 import logging
 import os
 
+# 离线属性强制：镜像内全部资产已内置，运行期任何进程不得触网。
 # 硬置 1（忽略 docker run -e 覆盖）——意外触网的调用毫秒级快速失败
 # 而非挂起等超时；想放开只能改代码，误配置物理上不可能。
 os.environ["HF_HUB_OFFLINE"] = "1"

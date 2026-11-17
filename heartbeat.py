@@ -7,6 +7,7 @@ import time
 
 from config import HEALTH_DIR
 
+
 def write_heartbeat(health_dir: str, pid: int, snapshot: dict) -> None:
     """心跳落盘（原子替换）：worker-<pid>.json，supervisor 据此做 hang 检测。"""
     os.makedirs(health_dir, exist_ok=True)

@@ -41,7 +41,6 @@ def test_env_helpers_default_from_registry(monkeypatch):
 def test_health_dir_single_source():
     """KOKORO_HEALTH_DIR 只在 proc_common.HEALTH_DIR 解析一次，
     gateway/supervisor 复用同一对象——不会出现两套健康目录。"""
-    import gateway
     import gateway_state
     import supervisor
 

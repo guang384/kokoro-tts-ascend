@@ -11,11 +11,12 @@ import math
 import os
 import re
 import time
+from typing import List
 
 import proc_common as _pc
 
 log = logging.getLogger("kokoro.npu")
-_last_budget = None   # (预算MB, L, 单批音频秒)：_prime_memory 写入，/metrics 的 npu_budget 读取
+_last_budget = None   # (预算MB, L, 单批音频秒)：_prime_memory 写入，metrics 预算指标读取
 _last_asr_budget = None  # (预算MB, T_max 帧, 单条音频秒上限)：prime_asr_memory 成功时写入
 _budget_error = None  # 预算/预占失败摘要（失败不阻塞服务，但必须可观测）
 _asr_budget_error = None  # asr 池预算失败摘要（同上；两个池各自独立可观测）
@@ -273,6 +274,11 @@ def _auto_budget_mb(max_batch: int, chunk_chars: int, speed_floor: float):
     return math.ceil(total_mb * 1.1), L, round(F / _FRAMES_PER_SEC, 1)
 
 
+# istftnet 上采样 10×6 × hop5 @ 24kHz → 每秒 80 帧（KOKORO_SAMPLE_RATE
+# 由 pipeline 启动期硬校验恒为 24000；本模块不 import pipeline 以免循环）
+_FRAMES_PER_SEC = 24000 / (10 * 6 * 5)
+
+
 def _asr_auto_budget_mb(max_batch: int, max_group_sec: float = None):
     """asr worker 显存预算自动推导（FunASR MonotonicAligner，全程 fp32）。
 
@@ -363,7 +369,7 @@ def _prime_memory(device: str) -> None:
         chunk_chars = _pc.env_int("TTS_CHUNK_CHARS", minimum=8)
         speed_floor = _pc.env_float("TTS_SPEED_FLOOR", minimum=0.1)
         budget_mb, L, sec = _auto_budget_mb(max_batch, chunk_chars, speed_floor)
-        frac, _idx = _apply_npu_budget(device, budget_mb, budget_mb * 2**20 * 1.05)
+        frac, _ = _apply_npu_budget(device, budget_mb, budget_mb * 2**20 * 1.05)
         _last_budget = (budget_mb, L, sec)
         _budget_error = None  # 重试成功必须复位：否则心跳永远假报预算失败
         log.info("NPU budget %.1fGB (auto: B=%d x %d chars/sent, speed>=%.1f,"

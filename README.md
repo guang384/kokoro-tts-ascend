@@ -156,8 +156,10 @@ redis-server 死亡 → supervisor 自动重启（队列重置，在途请求走
 | `heartbeat.py` | worker 心跳原子落盘线程 |
 
 约定：跨模块引用可变状态一律经所属模块属性（如 `gateway_state as gst` →
-`gst._pending`）——测试的 monkeypatch 目标即定义模块；facade 模块
-（`gateway.py`/`compute.py`/`proc_common.py`）只做聚合再导出。
+`gst._pending`）——测试的 monkeypatch 目标即定义模块。`compute.py` 与
+`proc_common.py` 只做聚合再导出（`proc_common` 另保留 BusyWatch/
+retry_forever/shm_usage 三个进程级小件）；`gateway.py` 保留 app/端点/
+`_synth` 主干，并再导出两个异常类供测试沿用。
 
 ## 构建
 
@@ -201,12 +203,11 @@ docker run -d --name kokoro-tts \
 多容器 + nginx：`IMAGE_TAG=$TAG docker compose up -d --build --scale api=4`（扩容后 `docker compose restart nginx`）。
 > `--scale` 每副本默认 4 tts × B8 + 4 asr × B8（64GB 整卡 ≈55GB 物理占用）——**单卡只能 1 副本**；多副本需多卡并在 compose 里按卡调小 worker 数。
 
-> **升级语义**：队列 member = 2B 音素数 + 1B 精度 + 20B 序号 + 载荷。新版本
-> **可读旧 22B 格式 member**（按 fp32 消费），但旧版本读新 member 仍会错位——
-> 单向兼容。生产按"整体替换容器"升级（队列随容器内 redis 消亡，天然满足）；
+> **升级语义**：队列 member = 2B 音素数 + 1B 精度 + 20B 序号 + 载荷，格式
+> 不跨版本兼容。生产按"整体替换容器"升级（队列随容器内 redis 消亡，天然满足）；
 > 若用 `IPC_REDIS_URL` 接外部共享 Redis：先停 gateway 与 g2p（不再产生新请求）
 > → 等 `/metrics` 的 `tts` depth=0（旧 worker 吃完队列）→ 停旧 tts/asr →
-> 起新版本。排空后队列为空，不存在混合格式 member，最稳妥。
+> 起新版本，排空后不存在混合格式 member。
 
 > **外部共享 Redis 限制**：队列键与 gateway 结果队列按本实例 origin 编号，
 > supervisor 的 sweep 只认本进程拉起的 worker pid——**一个 Redis 只允许
@@ -331,13 +332,13 @@ python scripts/parity_smoke.py                          # 故障注入冒烟（�
 日志按「谁 / 何时 / 为谁 / 干了什么」设计：行首 `[wtag]` 说明发出者，每行带绝对时间戳，`req/bid/chunk` 三级关联键把一次请求的全部行串起来。
 
 ```text
-[g2p-0] 2026-11-15 09:05:12,331 INFO req=8e0c68e5 queue_ms=8.1 process_ms=12.4 chunks=6 ovr=0 chars=651 sents=2
-[tts-0] 2026-11-15 09:05:13,102 INFO bid=t0-12345-42 n=3 process_ms=502.1 audio_s=34.8 dt=fp32
-[tts-0] 2026-11-15 09:05:13,102 INFO chunk=8e0c68e5_4_0 bid=t0-12345-42 process_ms=502.1 queue_ms=1800 audio_s=11.6 chars=108 sents=2
-[asr-0] 2026-11-15 09:05:13,340 INFO bid=a0-12345-17 n=3 process_ms=890.2
-[asr-0] 2026-11-15 09:05:13,340 INFO chunk=8e0c68e5_4_0 bid=a0-12345-17 process_ms=890.2 queue_ms=120 chars=25
-[gw-1]  2026-11-15 09:05:17,980 INFO ep=/tts req=8e0c68e5 voice=zf_001 speed=1.00 audio_s=136.1 e2e_s=5.85 agg_ms=4 enc_ms=83
-[gw-1]  2026-11-15 09:05:17,991 INFO req=8e0c68e5 chars=651 text=…
+[g2p-0] 2026-11-15 09:05:12,331 INFO:kokoro.g2p-0:req=8e0c68e5 queue_ms=8.1 process_ms=12.4 chunks=6 ovr=0 chars=651 sents=2
+[tts-0] 2026-11-15 09:05:13,102 INFO:kokoro.tts-0:bid=t0-12345-42 n=3 process_ms=502.1 audio_s=34.8 dt=fp32
+[tts-0] 2026-11-15 09:05:13,102 INFO:kokoro.tts-0:chunk=8e0c68e5_4_0 bid=t0-12345-42 process_ms=502.1 queue_ms=1800 audio_s=11.6 chars=108 sents=2
+[asr-0] 2026-11-15 09:05:13,340 INFO:kokoro.asr-0:bid=a0-12345-17 n=3 process_ms=890.2
+[asr-0] 2026-11-15 09:05:13,340 INFO:kokoro.asr-0:chunk=8e0c68e5_4_0 bid=a0-12345-17 process_ms=890.2 queue_ms=120 chars=25
+[gw-1] 2026-11-15 09:05:17,980 INFO:kokoro.server:ep=/tts req=8e0c68e5 voice=zf_001 speed=1.00 audio_s=136.1 e2e_s=5.85 agg_ms=4 enc_ms=83
+[gw-1] 2026-11-15 09:05:17,991 INFO:kokoro.server:req=8e0c68e5 chars=651 text=…
 ```
 
 **三级关联键**
@@ -474,7 +475,7 @@ livenessProbe:                  # 阈值覆盖瞬态恢复窗口（勿照抄社�
 | 指标族 | 类型 | 说明 |
 |---|---|---|
 | `kokoro_e2e_requests/successes/timeouts/rejected/fast_reject/cancelled/failed_total` | Counter | 服务级端到端计数（跨网关聚合；failed=超时+合成失败+500；fast_reject=准入快速拒绝，见错误码段） |
-| `kokoro_request_duration_seconds` | Histogram | 请求耗时（档位随 `WAIT_TIMEOUT_S` 推导：固定阶梯 1/2/5/10/15/20/30/45/60/120… 中小于总预算的档 + 总预算本身；默认 120s 即 `1/2/5/10/15/20/30/45/60/120`。`histogram_quantile()` 查询侧算分位；滚动升级期旧心跳只有 1/5/30 粒度） |
+| `kokoro_request_duration_seconds` | Histogram | 请求耗时（档位随 `WAIT_TIMEOUT_S` 推导：固定阶梯 1/2/5/10/15/20/30/45/60/120… 中小于总预算的档 + 总预算本身；默认 120s 即 `1/2/5/10/15/20/30/45/60/120`。`histogram_quantile()` 查询侧算分位） |
 | `kokoro_request_duration_{p50,p90,p99}_seconds` | Gauge | 滑动窗口分位数直读（近 50 次/网关，跨网关取保守最大） |
 | `kokoro_queue_{depth,in_total,out_total,avg_wait_ms,bad_total}{stage=...}` | Gauge/Counter | 队列 4 阶段（g2p/tts/asr/gateway，按请求流经顺序）；`bad_total`=坏/毒 member 丢弃累计（载荷损坏、重派超限放弃——非零即需排查；增量同时由 supervisor 打 WARNING，不依赖 metrics 开关） |
 | `kokoro_worker_{done_total,errors_total,ready}{worker,role=...}` | Counter/Gauge | 每 worker 完成/错误/就绪 |

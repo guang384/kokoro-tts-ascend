@@ -139,7 +139,7 @@ def chunk(req_id: str, idx: int, ps: str, voice: str, speed: float,
     dtype：随请求进认领类键（fp16/fp32 不混批——autocast 是整批上下文）。
     q_g2p_ms/g2p_ms：g2p 阶段耗时随行（队列等待/计算，毫秒）——g2p 整单
     一次算，同请求各 chunk 携带同值，网关聚合取 max；None 不落消息
-    （旧格式字节级不变，缺字段消费端按 0 兜底）。
+    （缺字段消费端按 0 兜底）。
     sents：该 chunk 合并的句子数（g2p 行/chunk 行的 sents 字段来源）；
     None 不落消息。"""
     msg = {"req_id": req_id, "idx": int(idx), "ps": ps, "voice": voice,

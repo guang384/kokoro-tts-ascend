@@ -1,19 +1,19 @@
 """gateway 聚合引擎：结果泵 + synth_part/chunk_ts 账本 + SHM 块生命周期。
 
-从 gateway 拆出的事件循环侧纯逻辑；全部可变状态经 gateway_state(st) 模块
+从 gateway 拆出的事件循环侧纯逻辑；全部可变状态经 gateway_state(gst) 模块
 属性访问（测试 patch gst 的绑定对这里可见）。_handle_result 由 _pump_once
 分发；_sweep_leaks 由 gateway_obs 的心跳循环周期调用。
 """
 import logging
 import time
 
-import proc_common
 import protocol
 
 import gateway_state as gst
 from gateway_state import _SynthError
 
 log = logging.getLogger("kokoro.server")
+
 
 def _sweep_leaks() -> None:
     """TTL 清扫：请求方已放弃的聚合状态/孤儿 Future——部分失败场景下

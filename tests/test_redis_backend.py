@@ -157,7 +157,7 @@ def test_get_injects_qw_ms(q):
 
 
 def test_external_item_without_stamp_gets_no_qw_ms(q):
-    """外部直写/旧消息无 _q_ts 戳 → 不注入 _qw_ms（消费端按 0 兜底）。"""
+    """外部直写/缺戳消息 → 不注入 _qw_ms（消费端按 0 兜底）。"""
     import pickle as _pickle
     q._redis().rpush(q._key, _pickle.dumps({"req_id": "r2"}))
     got = q.get(timeout=2)

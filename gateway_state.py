@@ -110,6 +110,10 @@ _voices_cache: Optional[set] = None
 _health_warn_ts = {}
 
 
+# 无主音频块超龄回收线：必须大于块的合法最长持有期。块在 tts 前向时创建，
+# /tts 最长合法生命周期现为单一截止线 ≤WAIT（音频+时间戳共享预算，不再
+# 两段串行 2×WAIT）；公式 2×WAIT+60 保留为更保守的历史余量，不会误扫活块。
+# 显式配置只能调大不能调小（低于公式值被抬高）。
 SHM_ORPHAN_MAX_AGE_S = max(
     proc_common.env_float("SHM_ORPHAN_MAX_AGE_S", 300.0, minimum=30.0),
     2 * _entry_wait_s + 60.0)   # WAIT_TIMEOUT_S 只在模块头解析一次

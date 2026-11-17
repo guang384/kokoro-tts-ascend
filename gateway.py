@@ -10,22 +10,17 @@
 """
 import asyncio
 import base64
-import bisect
-import collections
-import io
 import json
 import logging
 import os
 import queue
-import subprocess
 import threading
 import time
 import uuid
 from contextlib import asynccontextmanager
-from typing import Any, List, Literal, Optional
+from typing import Any, Literal
 
 import numpy as np
-import soundfile as sf
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, Field
@@ -51,6 +46,7 @@ proc_common.setup_logging(os.getenv("WORKER_TAG") or f"pid{os.getpid()}")
 log = logging.getLogger("kokoro.server")
 
 
+@asynccontextmanager
 async def _lifespan(app: FastAPI):
     """启动：登记事件循环 + 起心跳与结果泵；退出：摘心跳文件。
     （FastAPI lifespan 写法，替代已弃用的 on_event。）"""
@@ -89,10 +85,6 @@ def _check_voice(voice: str) -> None:
         gst._voices_cache = set(pipeline.list_voices())
     if voice not in gst._voices_cache:
         raise HTTPException(400, f"未知音色: {voice}，可通过 GET /v1/voices 查询全部音色")
-
-
-# /health 告警节流（必须定义在 _collect 之前：collector 注册/抓取会调用
-# _collect，而 _collect 会触发缺员/积压告警）
 
 
 @app.get("/health")
@@ -348,13 +340,10 @@ def _record_failure(status: int, reason: str) -> None:
         gst._entry_stats["server_5xx"] = gst._entry_stats.get("server_5xx", 0) + 1
         gst._entry_stats["last_5xx_ts"] = time.time()
     gst._recent_failures.append({"time": time.strftime("%H:%M:%S"),
-                             "status": status, "reason": str(reason)[:80]})
+                                  "status": status,
+                                  "reason": str(reason)[:80]})
 
 
-# 无主音频块超龄回收线：必须大于块的合法最长持有期。块在 tts 前向时创建，
-# /tts 最长合法生命周期现为单一截止线 ≤WAIT（音频+时间戳共享预算，不再
-# 两段串行 2×WAIT）；公式 2×WAIT+60 保留为更保守的历史余量，不会误扫活块。
-# 显式配置只能调大不能调小（低于公式值被抬高）。
 
 
 def _log_request_text(req_id: str, text: str) -> None:
@@ -678,7 +667,6 @@ async def tts_business(req: TTSRequest, request: Request = None):
         if blocks_desc is not None:
             gateway_agg._unlink_blocks(blocks_desc)  # 收尾统一回收（chunk_ts 收齐后块已无人读）
 
-    ts_timings = ts.get("timings") or {}   # asr 阶段耗时随 chunk_ts 捎带（ms）
     tts_cost = time.perf_counter() - t0
     duration = len(audio) / gst._sample_rate
 

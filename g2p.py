@@ -56,7 +56,7 @@ def _chunk_cap(speed: float) -> int:
     默认上限 120 字 @speed1.0 = 26.25s 本就不超标；speed < 0.9375 起线性
     收紧（0.5 → 64 字 ≈ 28s）。floor 8 = TTS_CHUNK_CHARS 下限。
     funasr_ts._split_groups 另有超长兜底硬切（校准偏差/直调路径）——
-    asr 组帧数硬封顶（pipeline._asr_auto_budget_mb 预算前提）两层保证。"""
+    asr 组帧数硬封顶（npu_ops._asr_auto_budget_mb 预算前提）两层保证。"""
     return min(_max_chunk,
                max(8, int((proc_common.ASR_MAX_GROUP_SEC - 2.0)
                           / _CHUNK_SEC_PER_CHAR * speed)))
@@ -223,7 +223,7 @@ def main(idx: int, g2p_queue, tts_queue, gateway_queues) -> None:
         finally:
             _busy.exit()
         g2p_ms = (time.perf_counter() - t0) * 1000
-        # 阶段耗时随行：_qw_ms 由队列 get 注入（g2p 队列等待）；旧消息/外部
+        # 阶段耗时随行：_qw_ms 由队列 get 注入（g2p 队列等待）；缺戳消息/外部
         # 直写无此键 → None 不落消息，网关按 0 兜底
         chunks = make_chunks(dict(req, speed=speed), sentences, ps_lists,
                              q_g2p_ms=req.get("_qw_ms"), g2p_ms=g2p_ms)

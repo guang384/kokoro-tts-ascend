@@ -7,7 +7,6 @@ import tempfile
 import fakeredis
 import pytest
 
-import proc_common
 import redis_transport
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))

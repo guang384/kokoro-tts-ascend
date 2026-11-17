@@ -160,8 +160,8 @@ def test_claim_drops_non_dict_payload(fakeredis_client, monkeypatch):
 
 def test_sweep_drops_bad_inflight_without_aborting_others(
         fakeredis_client, monkeypatch):
-    """infl 账本里的旧格式/损坏 member：丢弃计数，不得中断同账本其余
-    chunk 的精确重派（滚动升级混跑的收尾路径）。"""
+    """infl 账本里的损坏 member：丢弃计数，不得中断同账本其余
+    chunk 的精确重派。"""
     import time
 
     import proc_common as pc
@@ -179,7 +179,7 @@ def test_sweep_drops_bad_inflight_without_aborting_others(
     assert fakeredis_client.zcard(f"{q._key}:infl:tts-0-9") == 0
 
 
-# ── 离线（fakeredis+lua）覆盖近期队列改动：22B 兼容 / ack / 毒块 / 后置簿记 ──
+# ── 离线（fakeredis+lua）覆盖队列改动：ack / 毒块 / 后置簿记 ──
 
 class _FlakyRedis:
     """委托代理：按需让 get/eval 抛错，验证 claim 后置簿记/ack 重试。"""
@@ -284,7 +284,6 @@ def test_ship_batch_routes_chunk_dtype():
 
     import compute
     import proc_common
-    import redis_transport
     from tests.fake_queue import FakeQueue
 
     seen = {}

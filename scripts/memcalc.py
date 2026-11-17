@@ -238,7 +238,7 @@ def profile_table(card_gb: float) -> None:
     见 README 调参段）。asr 按 ~0.4× tts 吞吐单位配置（SANM encoder
     算术强度远低于 istftnet 生成器，单条算量约为 tts 的 1/3；blstm
     补丁把混合长度批的 predictor 段逐条化，留 0.1 折损余量）。"""
-    print(f"── 64GB 卡吞吐档参考（物理占用视角，含 asr 池）──")
+    print("── 64GB 卡吞吐档参考（物理占用视角，含 asr 池）──")
     profiles = [
         ("旧基线（v6 前默认）", 6, 4, 3, 1),
         ("现行默认",            4, 8, 4, 8),

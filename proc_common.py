@@ -8,7 +8,7 @@ compute / g2p / funasr_ts / supervisor / gateway 仍从本模块 import 全部
 本文件保留进程级小件：BusyWatch 看门狗状态、retry_forever 加载重试骨架、
 shm_usage（/dev/shm 观测）。
 
-入口进程（gateway.py）有自己的心跳实现（快照字段更丰富），不复用 heartbeat。
+入口进程的心跳（快照字段更丰富）在 gateway_obs.py，不复用 heartbeat。
 """
 import os
 import time
@@ -27,6 +27,17 @@ from redis_transport import (_CLAIM_HEADER, ASR_MAX_GROUP_SEC,
                              TtsClaimQueue, cancel_add, claim_queue_pressure,
                              decode_member, mailbox_depths, shared_redis,
                              start_redis_server)
+
+__all__ = [
+    "HEALTH_DIR", "TUNABLE_PARAMS", "BusyWatch", "IPC_REDIS_SOCKET",
+    "IPC_REDIS_URL", "QUEUE_INDEX", "TTS_BATCH_BUCKET_CHARS",
+    "ASR_MAX_GROUP_SEC", "InstrumentedQueue", "TtsClaimQueue", "cancel_add",
+    "claim_queue_pressure", "decode_member", "dump_config", "env_bool",
+    "env_float", "env_int", "env_str", "heartbeat_loop", "log_level",
+    "log_level_name", "mailbox_depths", "retry_forever", "setup_logging",
+    "shared_redis", "shm_usage", "start_heartbeat", "start_redis_server",
+    "write_heartbeat", "_CLAIM_HEADER", "_heartbeat_once",
+]
 
 
 class BusyWatch:
@@ -54,23 +65,9 @@ class BusyWatch:
         return round(time.monotonic() - since, 1) if since is not None else 0.0
 
 
-# ── 传输层：Redis 队列（唯一传输，redis-server 由 supervisor 子进程托管）──
-# 三段事故史，为什么最后落在 Redis：
-#   1) mp.Queue：锁是 POSIX 信号量（非 robust），进程持锁瞬间被 SIGKILL
-#      （OOM killer/看门狗强杀）→ 信号量永不释放 → 全员 get() 永久阻塞；
-#      feeder 线程被杀还会撕裂帧。锁在 C 层共享内存里，Python 层无解
-#      （20261108 生产事故）。
-#   2) ZeroMQ PUSH/PULL：broker 按 round-robin 预分配消息给 worker 管道，
-#      消费者 RCVHWM=1 时轮询落到忙 worker 的满管道 → 阻塞单线程转发，
-#      其余空闲 worker 饿死（队头阻塞，实测吞吐 -30%）；且计数器跨进程
-#      RMW 丢更新 → depth/in/out 幻影（20261110：57/113 条"幽灵积压"）。
-#   3) Redis（现状）：消息常驻服务端（worker 死亡队列零丢失，其他 worker
-#      接手）、LPOP 拉取 = 真 demand-pull（谁空闲谁取，无预分配无队头
-
-
 def shm_usage() -> dict | None:
     """/dev/shm 使用情况（MB + 水位 pct + total_bytes）；不可用（非 POSIX/
-    Windows 开发机）返回 None。gateway /health·水位告警与 supervisor 启动
+    Windows 开发机）返回 None。gateway_obs /health·水位告警与 supervisor 启动
     自检共用——statvfs 全仓库唯一一处。"""
     try:
         st = os.statvfs("/dev/shm")

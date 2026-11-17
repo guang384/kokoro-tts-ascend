@@ -87,7 +87,7 @@ def check_smi():
     return ids
 
 
-# ── 3. 候选生成顺序（与 pipeline._pick_npu_device 一致）──
+# ── 3. 候选生成顺序（与 npu_ops._pick_npu_device 一致）──
 def candidate_order(count, raw_env, smi_ids):
     order, seen = [], set()
 
@@ -103,7 +103,7 @@ def candidate_order(count, raw_env, smi_ids):
         add_i((start + k) % count)
     # 编排层注入的可见卡号（HAMi 注 ASCEND_RT_VISIBLE_DEVICES、
     # ascend-docker-runtime 注 ASCEND_VISIBLE_DEVICES）：驱动层真值，
-    # 与 pipeline._pick_npu_device 第 3 层同算法
+    # 与 npu_ops._pick_npu_device 第 3 层同算法
     for var in ("ASCEND_RT_VISIBLE_DEVICES", "ASCEND_VISIBLE_DEVICES"):
         for tok in os.getenv(var, "").split(","):
             tok = tok.strip()
@@ -171,7 +171,7 @@ def check_deep(smi_ids):
         add(OK, "torch.npu.device_count", str(count))
     except Exception as exc:  # noqa: BLE001
         # vNPU 切分（HAMi 等）CANN 枚举可能整体缺失——不放弃，降级 count=0
-        # 继续实探显式/env/驱动层候选（与 pipeline._pick_npu_device 对齐）
+        # 继续实探显式/env/驱动层候选（与 npu_ops._pick_npu_device 对齐）
         count = 0
         add(WARN, "torch.npu.device_count",
             f"不可用: {type(exc).__name__}: {str(exc)[:80]}"

@@ -97,7 +97,7 @@ def test_encode_ffmpeg_passes_timeout_and_returns_stdout(monkeypatch):
         seen.update(kw)
         return _FakeCompleted()
 
-    monkeypatch.setattr(gateway.subprocess, "run", _run)
+    monkeypatch.setattr(audio_enc.subprocess, "run", _run)
     out = audio_enc._encode_ffmpeg(__import__("numpy").zeros(8, "float32"), "mp3")
     assert out == b"enc" and seen["timeout"] == gateway_state._ffmpeg_timeout_s
 
@@ -106,7 +106,7 @@ def test_encode_ffmpeg_timeout_raises_runtime(monkeypatch):
     def _run(cmd, **kw):
         raise _sp.TimeoutExpired(cmd="ffmpeg", timeout=kw["timeout"])
 
-    monkeypatch.setattr(gateway.subprocess, "run", _run)
+    monkeypatch.setattr(audio_enc.subprocess, "run", _run)
     with pytest.raises(RuntimeError, match="编码超时"):
         audio_enc._encode_ffmpeg(__import__("numpy").zeros(8, "float32"), "mp3")
 

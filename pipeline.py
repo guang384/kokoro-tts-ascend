@@ -1,18 +1,15 @@
-"""Kokoro-82M-v1.1-zh 推理引擎：共享 KModel + 中文 G2P + 批量前向接口。
+"""Kokoro-82M-v1.1-zh 推理引擎：中文 G2P（G2PEngine）+ KModel 批前向（TTSCompute）。
 
-- 设备自动探测可用 NPU → GPU → CPU（DEVICE 可强制指定，
-  ASCEND_DEVICE_ID 指容器内逻辑卡号，越界/坏卡自动回退并告警）。
+- 设备发现（NPU→CPU 严格解析）、显存预算与 npu-smi 观测在 npu_ops.py；
+  本模块启动时经 npu_ops 取设备，模型加载后由 npu_ops 设预算/预占。
 - torch 相关 import 全部在函数内部，保证 uvicorn 多 worker 场景下
   每进程独立初始化。
 - 批量接口 synth_batch() 一次前向合成 B 个句子（见 batched_model.py）。
 """
-import importlib
 import logging
-import math
 import os
 import re
 import threading
-import time
 from typing import List, Sequence, Tuple
 
 import npu_ops
@@ -35,7 +32,6 @@ if _SAMPLE_RATE != 24000:
     raise RuntimeError(
         f"KOKORO_SAMPLE_RATE={_SAMPLE_RATE} 不支持：Kokoro-82M-v1.1-zh 与 "
         "batched_model/memcalc 固定为 24000Hz；请删除该 env 或设为 24000")
-_FRAMES_PER_SEC = _SAMPLE_RATE / (10 * 6 * 5)  # 80：istftnet 上采样 10×6 × hop5 → 每秒 80 帧
 
 
 def _build_en_callable():
