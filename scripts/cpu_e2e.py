@@ -564,6 +564,8 @@ class E2E:
             self.check("docker stop 优雅退出（ExitCode=0）", out.strip() == "0", out.strip())
             ok = ok and out.strip() == "0"
             self.logs(name)
+            if not self.args.keep:
+                self.remove(name)
             self.containers.remove(name)
         except Exception as exc:  # noqa: BLE001
             self.check("fault 阶段异常", False, str(exc))
@@ -677,6 +679,8 @@ class E2E:
 
             self.docker("stop", "-t", "20", name, timeout=60)
             self.logs(name)
+            if not self.args.keep:
+                self.remove(name)
             self.containers.remove(name)
             return ok
         except Exception as exc:  # noqa: BLE001
@@ -748,6 +752,8 @@ class E2E:
             if "ktts-e2e-baseline" in self.containers:
                 self.docker("stop", "-t", "20", "ktts-e2e-baseline", timeout=60)
                 self.logs("ktts-e2e-baseline")
+                if not self.args.keep:
+                    self.remove("ktts-e2e-baseline")
                 self.containers.remove("ktts-e2e-baseline")
             if "fault" in phases:
                 self.phase_fault()
