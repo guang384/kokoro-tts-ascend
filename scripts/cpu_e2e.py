@@ -92,7 +92,12 @@ class E2E:
             p = subprocess.run(cmd, capture_output=True, text=True,
                                timeout=timeout)
         except subprocess.TimeoutExpired as exc:
-            out = (exc.stdout or "") + (exc.stderr or "")
+            parts = []
+            for chunk in (exc.stdout, exc.stderr):
+                if isinstance(chunk, bytes):
+                    chunk = chunk.decode(errors="replace")
+                parts.append(chunk or "")
+            out = "".join(parts)
             if check:
                 raise RuntimeError(f"timeout({timeout}s): {' '.join(cmd)}\n{out[-2000:]}")
             return 124, out

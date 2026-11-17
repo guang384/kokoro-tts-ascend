@@ -290,6 +290,21 @@ python3 scripts/cpu_e2e.py --assets cpu-e2e-assets
 python3 scripts/cpu_e2e_deep.py --skip-build --assets cpu-e2e-assets
 ```
 
+### NPU/ARM 发布前预检
+
+CPU 验证不能替代 arm64/NPU 路径。以下脚本构建**生产 arm64 镜像**并在 QEMU
+下完成可验证的部分（模块清单/compileall/import/pytest 子集/依赖版本/模型
+烘入/NPU 预算锚点/采样率守卫），并记录 QEMU 下 torch 是否可导入：
+
+```bash
+python3 scripts/npu_prep.py                 # 构建 + 预检（不导出 tar）
+python3 scripts/npu_prep.py --skip-build    # 复用已有 arm64 镜像
+```
+
+注意：QEMU 下 torch 常因 oneDNN/xbyak 段错误不可用（脚本只记录、不门控）；
+NPU 算子、真机显存预算与吞吐必须在 Ascend 主机上用同一镜像再跑一次
+`docker run -e DEVICE=npu ...` / `scripts/npu_probe_check.py` 验证。
+
 `scripts/cpu_e2e.py` 的 gate：
 
 | 阶段 | 内容 |
